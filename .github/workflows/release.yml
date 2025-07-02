@@ -27,7 +27,5 @@ jobs:
         with:
           context: .
           push: true
-          # This tags the image with 'latest' and a unique tag based on the commit hash
-          tags: |
-            kareemsasa3/arachne:latest
-            kareemsasa3/arachne:${{ github.sha }}
+          # This tags the image with a unique tag based on the commit hash for development builds
+          tags: kareemsasa3/arachne:${{ github.sha }}
