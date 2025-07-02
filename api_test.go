@@ -173,8 +173,21 @@ func TestHandleScrape(t *testing.T) {
 					t.Errorf("job not found in storage: %v", err)
 				}
 
-				if job.Status != "pending" {
-					t.Errorf("expected job status 'pending', got %s", job.Status)
+				// The job should be in a valid state after creation
+				// Note: Due to the asynchronous nature, the job could be in any of these states:
+				// - "pending": Job created but not yet started
+				// - "running": Job started but not yet completed
+				// - "completed": Job completed (mock scraper is very fast)
+				validStates := []string{"pending", "running", "completed"}
+				isValidState := false
+				for _, state := range validStates {
+					if job.Status == state {
+						isValidState = true
+						break
+					}
+				}
+				if !isValidState {
+					t.Errorf("expected job status to be one of %v, got %s", validStates, job.Status)
 				}
 			}
 		})
@@ -193,7 +206,9 @@ func TestHandleJobStatus(t *testing.T) {
 		CreatedAt: time.Now(),
 		Progress:  100,
 	}
-	storage.SaveJob(context.Background(), testJob)
+	if err := storage.SaveJob(context.Background(), testJob); err != nil {
+		t.Fatalf("failed to save test job: %v", err)
+	}
 
 	tests := []struct {
 		name           string
@@ -432,4 +447,67 @@ func TestStorageInterface(t *testing.T) {
 			t.Error("expected error when getting deleted job, got nil")
 		}
 	})
+}
+
+func TestScrapeJobLifecycle(t *testing.T) {
+	storage := NewInMemoryStorage()
+	mockScraper := &MockScraper{}
+	handler := NewAPIHandler(mockScraper, DefaultConfig(), storage)
+
+	// Step 1: Submit a job
+	requestBody := `{"urls": ["https://example.com", "https://test.com"]}`
+	req, err := http.NewRequest("POST", "/scrape", bytes.NewBufferString(requestBody))
+	if err != nil {
+		t.Fatal(err)
+	}
+	rr := httptest.NewRecorder()
+	handlerFunc := http.HandlerFunc(handler.HandleScrape)
+	handlerFunc.ServeHTTP(rr, req)
+
+	if status := rr.Code; status != http.StatusAccepted {
+		t.Fatalf("handler returned wrong status code: got %v want %v", status, http.StatusAccepted)
+	}
+
+	var response ScrapeResponse
+	if err := json.Unmarshal(rr.Body.Bytes(), &response); err != nil {
+		t.Fatalf("failed to unmarshal response: %v", err)
+	}
+
+	jobID := response.JobID
+
+	// Step 2: Poll for job status until completed (with timeout)
+	var job *ScrapingJob
+	var pollErr error
+	maxWait := 2 * time.Second
+	interval := 20 * time.Millisecond
+	start := time.Now()
+	for {
+		job, pollErr = storage.GetJob(context.Background(), jobID)
+		if pollErr != nil {
+			t.Fatalf("job not found in storage: %v", pollErr)
+		}
+		if job.Status == "completed" {
+			break
+		}
+		if time.Since(start) > maxWait {
+			t.Fatalf("job did not complete within %v (last status: %s)", maxWait, job.Status)
+		}
+		time.Sleep(interval)
+	}
+
+	// Step 3: Assert final job state
+	if job.Status != "completed" {
+		t.Errorf("expected job status 'completed', got %s", job.Status)
+	}
+	if len(job.Results) != 2 {
+		t.Errorf("expected 2 results, got %d", len(job.Results))
+	}
+	for _, result := range job.Results {
+		if result.Status != 200 {
+			t.Errorf("expected result status 200, got %d", result.Status)
+		}
+		if result.Title == "" {
+			t.Errorf("expected non-empty title for result")
+		}
+	}
 }

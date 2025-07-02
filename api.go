@@ -124,7 +124,10 @@ func (h *APIHandler) HandleScrape(w http.ResponseWriter, r *http.Request) {
 
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusAccepted)
-	json.NewEncoder(w).Encode(response)
+	if err := json.NewEncoder(w).Encode(response); err != nil {
+		http.Error(w, "Failed to encode response", http.StatusInternalServerError)
+		return
+	}
 }
 
 // HandleJobStatus handles job status requests
@@ -158,7 +161,10 @@ func (h *APIHandler) HandleJobStatus(w http.ResponseWriter, r *http.Request) {
 	}
 
 	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(response)
+	if err := json.NewEncoder(w).Encode(response); err != nil {
+		http.Error(w, "Failed to encode response", http.StatusInternalServerError)
+		return
+	}
 }
 
 // executeScrapingJob executes a scraping job in the background
@@ -203,7 +209,10 @@ func (h *APIHandler) HandleHealth(w http.ResponseWriter, r *http.Request) {
 		"version":   "2.0.0",
 	}
 	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(response)
+	if err := json.NewEncoder(w).Encode(response); err != nil {
+		http.Error(w, "Failed to encode response", http.StatusInternalServerError)
+		return
+	}
 }
 
 // HandleMetrics handles metrics requests
@@ -215,7 +224,10 @@ func (h *APIHandler) HandleMetrics(w http.ResponseWriter, r *http.Request) {
 
 	metrics := h.scraper.GetMetrics()
 	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(metrics)
+	if err := json.NewEncoder(w).Encode(metrics); err != nil {
+		http.Error(w, "Failed to encode metrics", http.StatusInternalServerError)
+		return
+	}
 }
 
 // StartAPIServer starts the HTTP API server

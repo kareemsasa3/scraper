@@ -1,7 +1,7 @@
 # Go Web Scraper Makefile
 # Demonstrates build automation and development workflow
 
-.PHONY: help build test test-verbose benchmark clean run run-debug lint format check-deps install
+.PHONY: help build test test-verbose benchmark clean run run-debug lint format check-deps install scripts docs
 
 # Get all Go source files (excluding test files)
 GO_FILES := $(shell find . -name "*.go" -not -name "*_test.go" -not -name "circuit_breaker_test.go")
@@ -34,6 +34,21 @@ help:
 	@echo "📊 Examples:"
 	@echo "  make run concurrent=5 timeout=5s"
 	@echo "  make run-debug log-level=debug"
+	@echo ""
+	@echo "📜 Scripts:"
+	@echo "  scripts           - Show available scripts"
+	@echo "  perf-test         - Run performance tests"
+	@echo "  perf-test-concurrent - Test with different concurrency levels"
+	@echo "  test-workflow     - Test GitHub Actions workflows"
+	@echo ""
+	@echo "📚 Documentation:"
+	@echo "  docs              - Show documentation structure"
+	@echo ""
+	@echo "🧪 Testing:"
+	@echo "  test-all          - Run all tests (unit + integration)"
+	@echo "  test-unit         - Run unit tests only"
+	@echo "  test-integration  - Run integration tests only"
+	@echo "  test-coverage     - Run tests with coverage report"
 
 # Build the scraper
 build:
@@ -61,15 +76,38 @@ run-quotes:
 	@echo "🌐 Scraping quotes.toscrape.com with headless browser..."
 	go run $(GO_FILES) -headless=true -site="https://js.quotes.toscrape.com" -max-pages=10 -log-level=info
 
-# Run unit tests
-test:
-	@echo "🧪 Running unit tests..."
+# Run all tests (unit + integration)
+test-all:
+	@echo "🧪 Running all tests..."
 	go test -v ./...
 
-# Run tests with verbose output
+# Run unit tests only
+test-unit:
+	@echo "🧪 Running unit tests..."
+	go test -v -short ./...
+
+# Run integration tests only
+test-integration:
+	@echo "🧪 Running integration tests..."
+	go test -v ./tests/integration/...
+
+# Run tests with coverage report
+test-coverage:
+	@echo "🧪 Running tests with coverage..."
+	go test -v -cover ./...
+	@echo ""
+	@echo "📊 Generating coverage report..."
+	go test -coverprofile=coverage.out ./...
+	go tool cover -html=coverage.out -o coverage.html
+	@echo "✅ Coverage report generated: coverage.html"
+
+# Run tests with verbose output (legacy)
 test-verbose:
 	@echo "🧪 Running tests with verbose output..."
 	go test -v -count=1 ./...
+
+# Legacy test target (runs all tests)
+test: test-all
 
 # Run performance benchmarks
 benchmark:
@@ -127,7 +165,7 @@ run-custom:
 	go run $(GO_FILES) -concurrent=$(concurrent) -timeout=$(timeout) -log-level=$(log-level)
 
 # Performance test with different concurrency levels
-perf-test:
+perf-test-concurrent:
 	@echo "📊 Performance testing with different concurrency levels..."
 	@echo "Testing with 1 concurrent request..."
 	go run $(GO_FILES) -concurrent=1 -metrics=true
@@ -162,4 +200,63 @@ stats:
 	@find . -name "*.go" -not -path "./vendor/*" | wc -l
 	@echo ""
 	@echo "Test coverage:"
-	@go test -cover ./... 2>/dev/null || echo "Run tests to see coverage" 
+	@go test -cover ./... 2>/dev/null || echo "Run tests to see coverage"
+
+# Script management
+scripts:
+	@echo "📜 Available Scripts:"
+	@echo ""
+	@echo "🚀 Performance Tests:"
+	@echo "  ./scripts/performance/simple_performance_test.sh"
+	@echo "  ./scripts/performance/performance_test.sh"
+	@echo "  ./scripts/performance/robust_performance_test.sh"
+	@echo ""
+	@echo "🔧 Workflow Tests:"
+	@echo "  ./scripts/workflows/test-workflows.sh"
+	@echo ""
+	@echo "🌐 Site Tests:"
+	@echo "  ./scripts/interesting_sites_test.sh"
+	@echo ""
+	@echo "▶️  Application:"
+	@echo "  ./scripts/run.sh"
+	@echo ""
+	@echo "📖 See scripts/README.md for detailed usage"
+
+# Test GitHub Actions workflows
+test-workflow:
+	@echo "🔧 Testing GitHub Actions workflows..."
+	@if [ -f "./scripts/workflows/test-workflows.sh" ]; then \
+		chmod +x ./scripts/workflows/test-workflows.sh; \
+		./scripts/workflows/test-workflows.sh; \
+	else \
+		echo "❌ Workflow test script not found"; \
+	fi
+
+# Run performance tests
+perf-test:
+	@echo "📊 Running performance tests..."
+	@if [ -f "./scripts/performance/robust_performance_test.sh" ]; then \
+		chmod +x ./scripts/performance/*.sh; \
+		./scripts/performance/robust_performance_test.sh; \
+	else \
+		echo "❌ Performance test scripts not found"; \
+	fi
+
+# Show documentation structure
+docs:
+	@echo "📚 Documentation Structure:"
+	@echo ""
+	@echo "📖 Main Documentation:"
+	@echo "  docs/README.md              - Documentation index and navigation"
+	@echo "  docs/RUNNING.md             - Detailed running instructions"
+	@echo "  docs/CONTRIBUTING.md        - Development guidelines"
+	@echo "  docs/GITHUB_ACTIONS_SETUP.md - CI/CD setup guide"
+	@echo "  docs/PERFORMANCE_REPORT.md  - Performance analysis"
+	@echo ""
+	@echo "📜 Scripts Documentation:"
+	@echo "  scripts/README.md           - Scripts usage and organization"
+	@echo ""
+	@echo "🔗 Quick Links:"
+	@echo "  📖 Full Documentation: docs/README.md"
+	@echo "  🚀 Quick Start: README.md"
+	@echo "  🛠️  Contributing: docs/CONTRIBUTING.md" 

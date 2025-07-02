@@ -440,7 +440,10 @@ func main() {
 		// API mode - start the server
 		port := 8080 // Default port for containerized environment
 		if apiPort != "0" {
-			fmt.Sscanf(apiPort, "%d", &port)
+			if _, err := fmt.Sscanf(apiPort, "%d", &port); err != nil {
+				fmt.Printf("Warning: invalid API port '%s', using default port 8080\n", apiPort)
+				port = 8080
+			}
 		}
 
 		fmt.Printf("🚀 Starting Scraper API Server on port %d...\n", port)

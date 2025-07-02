@@ -65,9 +65,9 @@ func TestCircuitBreakerStats(t *testing.T) {
 	cb := NewCircuitBreaker(3, 50*time.Millisecond) // Higher threshold to allow all requests
 
 	// Execute some requests
-	cb.Execute(func() error { return errors.New("error1") })
-	cb.Execute(func() error { return nil })
-	cb.Execute(func() error { return errors.New("error2") })
+	_ = cb.Execute(func() error { return errors.New("error1") })
+	_ = cb.Execute(func() error { return nil })
+	_ = cb.Execute(func() error { return errors.New("error2") })
 
 	stats := cb.GetStats()
 
@@ -96,7 +96,7 @@ func TestCircuitBreakerErrorType(t *testing.T) {
 	cb := NewCircuitBreaker(1, 10*time.Millisecond)
 
 	// Make it fail once to open the circuit
-	cb.Execute(func() error { return errors.New("test error") })
+	_ = cb.Execute(func() error { return errors.New("test error") })
 
 	// Try to execute when circuit is open
 	err := cb.Execute(func() error { return nil })
@@ -122,7 +122,7 @@ func TestCircuitBreakerConcurrentAccess(t *testing.T) {
 	// Test concurrent access
 	for i := 0; i < 10; i++ {
 		go func() {
-			cb.Execute(func() error { return errors.New("concurrent error") })
+			_ = cb.Execute(func() error { return errors.New("concurrent error") })
 			done <- true
 		}()
 	}
@@ -143,6 +143,6 @@ func BenchmarkCircuitBreakerExecute(b *testing.B) {
 
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
-		cb.Execute(func() error { return nil })
+		_ = cb.Execute(func() error { return nil })
 	}
 }

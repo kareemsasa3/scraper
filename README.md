@@ -18,9 +18,9 @@
 <p align="center">
   <a href="#-quick-start"><strong>Quick Start</strong></a> ·
   <a href="#-architecture--design"><strong>Architecture</strong></a> ·
-  <a href="CONTRIBUTING.md"><strong>Contributing</strong></a> ·
-  <a href="GITHUB_ACTIONS_SETUP.md"><strong>CI/CD Setup</strong></a> ·
-  <a href="PERFORMANCE_REPORT.md"><strong>Performance</strong></a> ·
+  <a href="docs/CONTRIBUTING.md"><strong>Contributing</strong></a> ·
+  <a href="docs/GITHUB_ACTIONS_SETUP.md"><strong>CI/CD Setup</strong></a> ·
+  <a href="docs/PERFORMANCE_REPORT.md"><strong>Performance</strong></a> ·
   <a href="LICENSE"><strong>License</strong></a>
 </p>
 
@@ -122,7 +122,7 @@ Arachne is designed to be resilient and stateful. Your scraping jobs and results
 
 This project is managed with a professional, automated CI/CD pipeline using GitHub Actions to ensure code quality and streamline releases.
 
-For details on the specific workflows, branch protection rules, and how to contribute, please see our [CONTRIBUTING.md](CONTRIBUTING.md) file.
+For details on the specific workflows, branch protection rules, and how to contribute, please see our [CONTRIBUTING.md](docs/CONTRIBUTING.md) file.
 
 ## ⚙️ Configuration
 
@@ -137,11 +137,41 @@ Environment variables can be set in a `.env` file. See `.env.example` for a full
 
 ## 🧪 Testing
 
-Run all local tests, including coverage report:
+The project includes comprehensive testing with multiple test categories:
 
+### Quick Test Commands
 ```bash
-go test -v -cover ./...
+# Run all tests
+make test-all
+
+# Run unit tests only
+make test-unit
+
+# Run integration tests only
+make test-integration
+
+# Run tests with coverage report
+make test-coverage
 ```
+
+### Test Organization
+- **Unit Tests**: `*_test.go` files next to source files
+- **Integration Tests**: `tests/integration/` directory
+- **Test Helpers**: `tests/helpers/` directory
+- **Test Fixtures**: `tests/fixtures/` directory
+
+For detailed testing information, see [tests/README.md](tests/README.md).
+
+## 📚 Documentation
+
+Comprehensive documentation is available in the [`docs/`](docs/) directory:
+
+- **[📖 Documentation Index](docs/README.md)** - Complete guide to all documentation
+- **[🚀 Running Guide](docs/RUNNING.md)** - Detailed instructions for running the scraper
+- **[🛠️ Contributing Guide](docs/CONTRIBUTING.md)** - Development guidelines and setup
+- **[🤖 CI/CD Setup](docs/GITHUB_ACTIONS_SETUP.md)** - Automated pipeline configuration
+- **[📊 Performance Report](docs/PERFORMANCE_REPORT.md)** - Benchmarking and analysis results
+- **[📜 Scripts Documentation](scripts/README.md)** - Utility scripts and tools
 
 ## 📄 License
 

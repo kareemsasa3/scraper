@@ -1,0 +1,25 @@
+{
+    "valid_urls": [
+        "https://httpbin.org/html",
+        "https://httpbin.org/json",
+        "https://httpbin.org/xml",
+        "https://example.com",
+        "https://golang.org"
+    ],
+    "invalid_urls": [
+        "not-a-url",
+        "ftp://example.com",
+        "http://",
+        ""
+    ],
+    "javascript_sites": [
+        "https://js.quotes.toscrape.com",
+        "https://reactjs.org",
+        "https://vuejs.org"
+    ],
+    "large_sites": [
+        "https://github.com",
+        "https://stackoverflow.com",
+        "https://wikipedia.org"
+    ]
+}
