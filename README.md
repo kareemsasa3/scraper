@@ -15,6 +15,15 @@
   <a href="https://github.com/kareemsasa3/arachne/releases/latest"><img src="https://img.shields.io/github/v/release/kareemsasa3/arachne" /></a>
 </p>
 
+<p align="center">
+  <a href="#-quick-start"><strong>Quick Start</strong></a> ·
+  <a href="#-architecture--design"><strong>Architecture</strong></a> ·
+  <a href="CONTRIBUTING.md"><strong>Contributing</strong></a> ·
+  <a href="GITHUB_ACTIONS_SETUP.md"><strong>CI/CD Setup</strong></a> ·
+  <a href="PERFORMANCE_REPORT.md"><strong>Performance</strong></a> ·
+  <a href="LICENSE"><strong>License</strong></a>
+</p>
+
 ## ✨ Features
 
 - **🚀 Asynchronous API**: Submit scraping jobs and poll for results later.
