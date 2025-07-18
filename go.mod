@@ -1,4 +1,4 @@
-module arachne
+module github.com/kareemsasa3/arachne
 
 go 1.23.0
 

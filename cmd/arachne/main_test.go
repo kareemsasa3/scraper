@@ -4,10 +4,11 @@ import (
 	"testing"
 	"time"
 
-	"arachne/internal/config"
-	"arachne/internal/errors"
-	"arachne/internal/metrics"
-	"arachne/pkg/parser"
+	"github.com/kareemsasa3/arachne/pkg/parser"
+
+	"github.com/kareemsasa3/arachne/internal/config"
+	"github.com/kareemsasa3/arachne/internal/errors"
+	"github.com/kareemsasa3/arachne/internal/metrics"
 )
 
 func TestExtractHTMLTitle(t *testing.T) {

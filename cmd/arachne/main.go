@@ -6,13 +6,14 @@ import (
 	"fmt"
 	"log"
 	"os"
+	"strings"
 	"time"
 
-	"arachne/internal/api"
-	"arachne/internal/config"
-	"arachne/internal/processor"
-	"arachne/internal/scraper"
-	"arachne/internal/types"
+	"github.com/kareemsasa3/arachne/internal/api"
+	"github.com/kareemsasa3/arachne/internal/config"
+	"github.com/kareemsasa3/arachne/internal/processor"
+	"github.com/kareemsasa3/arachne/internal/scraper"
+	"github.com/kareemsasa3/arachne/internal/types"
 )
 
 func main() {
@@ -79,7 +80,7 @@ func setupConfig() *config.Config {
 	// Load configuration
 	cfg := config.LoadConfig()
 
-	// Override with command-line flags
+	// Override with command-line flags (only if explicitly set)
 	cfg.MaxConcurrent = *maxConcurrent
 	cfg.RequestTimeout = *requestTimeout
 	cfg.TotalTimeout = *totalTimeout
@@ -90,7 +91,15 @@ func setupConfig() *config.Config {
 	cfg.EnableMetrics = *enableMetrics
 	cfg.EnableLogging = *enableLogging
 	cfg.UserAgent = *userAgent
-	cfg.UseHeadless = *useHeadless
+	// Only override UseHeadless if the headless flag was explicitly provided
+	if len(os.Args) > 1 {
+		for _, arg := range os.Args[1:] {
+			if strings.HasPrefix(arg, "-headless") {
+				cfg.UseHeadless = *useHeadless
+				break
+			}
+		}
+	}
 	cfg.MaxPages = *maxPages
 	cfg.StorageBackend = *storageBackend
 	cfg.EnablePlugins = *enablePlugins

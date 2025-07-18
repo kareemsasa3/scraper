@@ -7,9 +7,10 @@ import (
 	"net/http"
 	"time"
 
-	"arachne/internal/config"
-	"arachne/internal/errors"
-	"arachne/pkg/parser"
+	"github.com/kareemsasa3/arachne/pkg/parser"
+
+	"github.com/kareemsasa3/arachne/internal/config"
+	"github.com/kareemsasa3/arachne/internal/errors"
 )
 
 // ScrapedResult is a unified struct returned by any strategy.

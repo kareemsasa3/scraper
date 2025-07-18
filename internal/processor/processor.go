@@ -5,7 +5,7 @@ import (
 	"fmt"
 	"os"
 
-	"arachne/internal/types"
+	"github.com/kareemsasa3/arachne/internal/types"
 )
 
 // ResultProcessor processes and formats results

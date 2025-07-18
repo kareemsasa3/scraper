@@ -28,8 +28,9 @@ services:
       - SCRAPER_ENABLE_LOGGING=true
       - SCRAPER_LOG_LEVEL=info
       - SCRAPER_MAX_CONCURRENT=5
-      - SCRAPER_REQUEST_TIMEOUT=10s
-      - SCRAPER_TOTAL_TIMEOUT=30s
+      - SCRAPER_REQUEST_TIMEOUT=120s
+      - SCRAPER_TOTAL_TIMEOUT=180s
+      - SCRAPER_USE_HEADLESS=true
     depends_on:
       redis:
         condition: service_healthy

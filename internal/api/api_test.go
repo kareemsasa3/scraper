@@ -10,9 +10,9 @@ import (
 	"testing"
 	"time"
 
-	"arachne/internal/config"
-	"arachne/internal/storage"
-	"arachne/internal/types"
+	"github.com/kareemsasa3/arachne/internal/config"
+	"github.com/kareemsasa3/arachne/internal/storage"
+	"github.com/kareemsasa3/arachne/internal/types"
 )
 
 // MockScraper is a mock implementation for testing

@@ -9,9 +9,9 @@ import (
 
 	"github.com/google/uuid"
 
-	"arachne/internal/config"
-	"arachne/internal/storage"
-	"arachne/internal/types"
+	"github.com/kareemsasa3/arachne/internal/config"
+	"github.com/kareemsasa3/arachne/internal/storage"
+	"github.com/kareemsasa3/arachne/internal/types"
 )
 
 // ScraperInterface defines the interface for scrapers

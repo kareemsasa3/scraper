@@ -5,8 +5,8 @@ import (
 	"fmt"
 	"strings"
 
-	"arachne/internal/errors"
-	"arachne/internal/types"
+	"github.com/kareemsasa3/arachne/internal/errors"
+	"github.com/kareemsasa3/arachne/internal/types"
 )
 
 // DataProcessor defines the interface for processing scraped data
