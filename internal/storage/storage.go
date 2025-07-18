@@ -9,7 +9,7 @@ import (
 
 	"github.com/redis/go-redis/v9"
 
-	"arachne/internal/types"
+	"github.com/kareemsasa3/arachne/internal/types"
 )
 
 // StorageBackend defines the interface for different storage backends

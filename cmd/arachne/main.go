@@ -9,11 +9,11 @@ import (
 	"strings"
 	"time"
 
-	"arachne/internal/api"
-	"arachne/internal/config"
-	"arachne/internal/processor"
-	"arachne/internal/scraper"
-	"arachne/internal/types"
+	"github.com/kareemsasa3/arachne/internal/api"
+	"github.com/kareemsasa3/arachne/internal/config"
+	"github.com/kareemsasa3/arachne/internal/processor"
+	"github.com/kareemsasa3/arachne/internal/scraper"
+	"github.com/kareemsasa3/arachne/internal/types"
 )
 
 func main() {
