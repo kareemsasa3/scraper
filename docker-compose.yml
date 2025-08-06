@@ -4,10 +4,10 @@ services:
     image: redis:7-alpine
     container_name: scraper-redis
     ports:
-      - "6379:6379"
+      - "${REDIS_PORT:-6379}:${REDIS_PORT:-6379}"
     volumes:
       - redis_data:/data
-    command: redis-server --appendonly yes
+    command: redis-server --appendonly yes --maxmemory ${REDIS_MAX_MEMORY:-512mb} --maxmemory-policy ${REDIS_MAX_MEMORY_POLICY:-allkeys-lru}
     healthcheck:
       test: ["CMD", "redis-cli", "ping"]
       interval: 30s
@@ -20,17 +20,20 @@ services:
     build: .
     container_name: scraper-app
     ports:
-      - "8080:8080"
+      - "${ARACHNE_PORT:-8080}:${ARACHNE_PORT:-8080}"
     environment:
-      - SCRAPER_REDIS_ADDR=redis:6379
-      - SCRAPER_REDIS_DB=0
-      - SCRAPER_ENABLE_METRICS=true
-      - SCRAPER_ENABLE_LOGGING=true
-      - SCRAPER_LOG_LEVEL=info
-      - SCRAPER_MAX_CONCURRENT=5
-      - SCRAPER_REQUEST_TIMEOUT=120s
-      - SCRAPER_TOTAL_TIMEOUT=180s
-      - SCRAPER_USE_HEADLESS=true
+      - SCRAPER_REDIS_ADDR=${ARACHNE_REDIS_ADDR:-redis:6379}
+      - SCRAPER_REDIS_DB=${ARACHNE_REDIS_DB:-0}
+      - SCRAPER_ENABLE_METRICS=${ARACHNE_ENABLE_METRICS:-true}
+      - SCRAPER_ENABLE_LOGGING=${ARACHNE_ENABLE_LOGGING:-true}
+      - SCRAPER_LOG_LEVEL=${ARACHNE_LOG_LEVEL:-info}
+      - SCRAPER_MAX_CONCURRENT=${ARACHNE_MAX_CONCURRENT:-5}
+      - SCRAPER_REQUEST_TIMEOUT=${ARACHNE_REQUEST_TIMEOUT:-120s}
+      - SCRAPER_TOTAL_TIMEOUT=${ARACHNE_TOTAL_TIMEOUT:-180s}
+      - SCRAPER_USE_HEADLESS=${ARACHNE_USE_HEADLESS:-true}
+      - SCRAPER_USER_AGENT=${ARACHNE_USER_AGENT:-Mozilla/5.0 (compatible; PortfolioBot/1.0)}
+      - SCRAPER_RATE_LIMIT=${ARACHNE_RATE_LIMIT:-2}
+      - SCRAPER_RATE_LIMIT_WINDOW=${ARACHNE_RATE_LIMIT_WINDOW:-1s}
     depends_on:
       redis:
         condition: service_healthy
@@ -57,9 +60,9 @@ services:
     image: rediscommander/redis-commander:latest
     container_name: redis-commander
     ports:
-      - "8081:8081"
+      - "${REDIS_COMMANDER_PORT:-8081}:${REDIS_COMMANDER_PORT:-8081}"
     environment:
-      - REDIS_HOSTS=local:redis:6379
+      - REDIS_HOSTS=local:redis:${REDIS_PORT:-6379}
     depends_on:
       - redis
     restart: unless-stopped
