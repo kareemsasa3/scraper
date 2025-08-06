@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/prometheus/client_golang/prometheus/promhttp"
 
 	"github.com/kareemsasa3/arachne/internal/config"
 	"github.com/kareemsasa3/arachne/internal/storage"
@@ -250,6 +251,9 @@ func StartAPIServer(scraper ScraperInterface, cfg *config.Config, port int) erro
 	http.HandleFunc("/health", handler.HandleHealth)
 	http.HandleFunc("/metrics", handler.HandleMetrics)
 
+	// Prometheus metrics endpoint
+	http.Handle("/prometheus", promhttp.Handler())
+
 	// Start server
 	addr := fmt.Sprintf(":%d", port)
 	fmt.Printf("🚀 Starting API server on port %d\n", port)
@@ -258,6 +262,7 @@ func StartAPIServer(scraper ScraperInterface, cfg *config.Config, port int) erro
 	fmt.Printf("   GET  /scrape/status?id=<job_id> - Get job status\n")
 	fmt.Printf("   GET  /health - Health check\n")
 	fmt.Printf("   GET  /metrics - Get metrics\n")
+	fmt.Printf("   GET  /prometheus - Prometheus metrics\n")
 
 	return http.ListenAndServe(addr, nil)
 }
