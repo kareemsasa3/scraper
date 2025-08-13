@@ -3,7 +3,7 @@
 # Go Web Scraper Runner Script
 # Automatically finds and runs Go source files (excluding test files)
 
-set -e
+set -euo pipefail
 
 # Colors for output
 RED='\033[0;31m'

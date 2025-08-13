@@ -9,51 +9,59 @@ import (
 
 // Config holds all configuration for the scraper
 type Config struct {
-	MaxConcurrent           int            `json:"max_concurrent"`
-	RequestTimeout          time.Duration  `json:"request_timeout"`
-	TotalTimeout            time.Duration  `json:"total_timeout"`
-	UserAgent               string         `json:"user_agent"`
-	OutputFile              string         `json:"output_file"`
-	RetryAttempts           int            `json:"retry_attempts"`
-	RetryDelay              time.Duration  `json:"retry_delay"`
-	EnableMetrics           bool           `json:"enable_metrics"`
-	EnableLogging           bool           `json:"enable_logging"`
-	LogLevel                string         `json:"log_level"`
-	DomainRateLimit         map[string]int `json:"domain_rate_limit"`
-	CircuitBreakerThreshold int            `json:"circuit_breaker_threshold"`
-	CircuitBreakerTimeout   time.Duration  `json:"circuit_breaker_timeout"`
-	UseHeadless             bool           `json:"use_headless"`
-	MaxPages                int            `json:"max_pages"`
-	StorageBackend          string         `json:"storage_backend"`
-	EnablePlugins           bool           `json:"enable_plugins"`
-	RedisAddr               string         `json:"redis_addr"`
-	RedisPassword           string         `json:"redis_password"`
-	RedisDB                 int            `json:"redis_db"`
+	MaxConcurrent            int            `json:"max_concurrent"`
+	RequestTimeout           time.Duration  `json:"request_timeout"`
+	TotalTimeout             time.Duration  `json:"total_timeout"`
+	UserAgent                string         `json:"user_agent"`
+	OutputFile               string         `json:"output_file"`
+	RetryAttempts            int            `json:"retry_attempts"`
+	RetryDelay               time.Duration  `json:"retry_delay"`
+	EnableMetrics            bool           `json:"enable_metrics"`
+	EnableLogging            bool           `json:"enable_logging"`
+	LogLevel                 string         `json:"log_level"`
+	DomainRateLimit          map[string]int `json:"domain_rate_limit"`
+	CircuitBreakerThreshold  int            `json:"circuit_breaker_threshold"`
+	CircuitBreakerTimeout    time.Duration  `json:"circuit_breaker_timeout"`
+	UseHeadless              bool           `json:"use_headless"`
+	HeadlessIgnoreCertErrors bool           `json:"headless_ignore_cert_errors"`
+	HeadlessNoSandbox        bool           `json:"headless_no_sandbox"`
+	MaxPages                 int            `json:"max_pages"`
+	StorageBackend           string         `json:"storage_backend"`
+	EnablePlugins            bool           `json:"enable_plugins"`
+	RedisAddr                string         `json:"redis_addr"`
+	RedisPassword            string         `json:"redis_password"`
+	RedisDB                  int            `json:"redis_db"`
+	MaxContentBytes          int            `json:"max_content_bytes"`
+	APIToken                 string         `json:"api_token"`
 }
 
 // DefaultConfig returns default configuration
 func DefaultConfig() *Config {
 	return &Config{
-		MaxConcurrent:           3,
-		RequestTimeout:          10 * time.Second,
-		TotalTimeout:            30 * time.Second,
-		UserAgent:               "Go-Scraper/2.0",
-		OutputFile:              "scraping_results.json",
-		RetryAttempts:           3,
-		RetryDelay:              1 * time.Second,
-		EnableMetrics:           true,
-		EnableLogging:           true,
-		LogLevel:                "info",
-		DomainRateLimit:         make(map[string]int),
-		CircuitBreakerThreshold: 3,
-		CircuitBreakerTimeout:   30 * time.Second,
-		UseHeadless:             false,
-		MaxPages:                10,
-		StorageBackend:          "json",
-		EnablePlugins:           true,
-		RedisAddr:               "",
-		RedisPassword:           "",
-		RedisDB:                 0,
+		MaxConcurrent:            3,
+		RequestTimeout:           10 * time.Second,
+		TotalTimeout:             30 * time.Second,
+		UserAgent:                "Go-Scraper/2.0",
+		OutputFile:               "scraping_results.json",
+		RetryAttempts:            3,
+		RetryDelay:               1 * time.Second,
+		EnableMetrics:            true,
+		EnableLogging:            true,
+		LogLevel:                 "info",
+		DomainRateLimit:          make(map[string]int),
+		CircuitBreakerThreshold:  3,
+		CircuitBreakerTimeout:    30 * time.Second,
+		UseHeadless:              false,
+		HeadlessIgnoreCertErrors: false,
+		HeadlessNoSandbox:        false,
+		MaxPages:                 10,
+		StorageBackend:           "json",
+		EnablePlugins:            true,
+		RedisAddr:                "",
+		RedisPassword:            "",
+		RedisDB:                  0,
+		MaxContentBytes:          16384,
+		APIToken:                 "",
 	}
 }
 
@@ -128,6 +136,14 @@ func LoadConfig() *Config {
 		config.UseHeadless = val == "true"
 	}
 
+	if val := os.Getenv("SCRAPER_HEADLESS_IGNORE_CERT_ERRORS"); val != "" {
+		config.HeadlessIgnoreCertErrors = val == "true"
+	}
+
+	if val := os.Getenv("SCRAPER_HEADLESS_NO_SANDBOX"); val != "" {
+		config.HeadlessNoSandbox = val == "true"
+	}
+
 	if val := os.Getenv("SCRAPER_MAX_PAGES"); val != "" {
 		if parsed, err := strconv.Atoi(val); err == nil {
 			config.MaxPages = parsed
@@ -146,6 +162,16 @@ func LoadConfig() *Config {
 		if parsed, err := strconv.Atoi(val); err == nil {
 			config.RedisDB = parsed
 		}
+	}
+
+	if val := os.Getenv("SCRAPER_MAX_CONTENT_BYTES"); val != "" {
+		if parsed, err := strconv.Atoi(val); err == nil {
+			config.MaxContentBytes = parsed
+		}
+	}
+
+	if val := os.Getenv("SCRAPER_API_TOKEN"); val != "" {
+		config.APIToken = val
 	}
 
 	return config

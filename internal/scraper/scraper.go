@@ -125,10 +125,17 @@ func (s *Scraper) doScrape(ctx context.Context, urlStr string) types.ScrapedData
 
 			// Set data
 			data.Status = result.StatusCode
-			data.Size = len(result.Body)
 			data.Title = result.Title
 			data.NextURL = result.NextURL
-			data.Content = result.Body // Store the full HTML/JSON content
+
+			// Truncate content to configured max bytes, compute size from full body length
+			fullLen := len(result.Body)
+			data.Size = fullLen
+			if s.config.MaxContentBytes > 0 && fullLen > s.config.MaxContentBytes {
+				data.Content = result.Body[:s.config.MaxContentBytes]
+			} else {
+				data.Content = result.Body
+			}
 
 			return nil
 		})

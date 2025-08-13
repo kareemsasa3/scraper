@@ -1,6 +1,7 @@
 package metrics
 
 import (
+	"strconv"
 	"sync"
 	"time"
 
@@ -211,7 +212,7 @@ func NewPrometheusMetrics() *PrometheusMetrics {
 
 // RecordHTTPRequest records an HTTP request
 func (pm *PrometheusMetrics) RecordHTTPRequest(method, endpoint string, statusCode int, duration time.Duration) {
-	pm.httpRequestsTotal.WithLabelValues(method, endpoint, string(rune(statusCode))).Inc()
+	pm.httpRequestsTotal.WithLabelValues(method, endpoint, strconv.Itoa(statusCode)).Inc()
 	pm.httpRequestDuration.WithLabelValues(method, endpoint).Observe(duration.Seconds())
 }
 
@@ -228,7 +229,7 @@ func (pm *PrometheusMetrics) RecordScrapingSuccess(domain string, statusCode int
 	pm.scrapingDuration.WithLabelValues(domain).Observe(duration.Seconds())
 	pm.scrapingBytesTotal.WithLabelValues(domain).Add(float64(bytes))
 	pm.domainResponseTime.WithLabelValues(domain).Observe(duration.Seconds())
-	pm.statusCodeTotal.WithLabelValues(string(rune(statusCode))).Inc()
+	pm.statusCodeTotal.WithLabelValues(strconv.Itoa(statusCode)).Inc()
 }
 
 // RecordScrapingFailure records a failed scraping request
@@ -236,7 +237,7 @@ func (pm *PrometheusMetrics) RecordScrapingFailure(domain, errorType string, sta
 	pm.scrapingFailureTotal.WithLabelValues(domain, errorType).Inc()
 	pm.domainFailureTotal.WithLabelValues(domain).Inc()
 	if statusCode > 0 {
-		pm.statusCodeTotal.WithLabelValues(string(rune(statusCode))).Inc()
+		pm.statusCodeTotal.WithLabelValues(strconv.Itoa(statusCode)).Inc()
 	}
 }
 

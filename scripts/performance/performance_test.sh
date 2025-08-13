@@ -3,7 +3,7 @@
 # Performance Testing Script for Arachne Web Scraper
 # This script tests various performance aspects of the scraper
 
-set -e
+set -euo pipefail
 
 # Colors for output
 RED='\033[0;31m'
@@ -63,6 +63,10 @@ log_warning() {
 log_error() {
     echo -e "${RED}[ERROR]${NC} $1"
 }
+
+# Ensure required tools
+command -v curl >/dev/null 2>&1 || { log_error "curl not found"; exit 1; }
+command -v jq >/dev/null 2>&1 || { log_error "jq not found"; exit 1; }
 
 # Check if API is running
 check_api_health() {

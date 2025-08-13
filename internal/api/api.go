@@ -71,6 +71,15 @@ type JobStatusResponse struct {
 
 // HandleScrape handles scraping requests asynchronously
 func (h *APIHandler) HandleScrape(w http.ResponseWriter, r *http.Request) {
+	// Simple bearer token auth if configured
+	if h.config.APIToken != "" {
+		auth := r.Header.Get("Authorization")
+		const prefix = "Bearer "
+		if len(auth) <= len(prefix) || auth[:len(prefix)] != prefix || auth[len(prefix):] != h.config.APIToken {
+			http.Error(w, "Unauthorized", http.StatusUnauthorized)
+			return
+		}
+	}
 	if r.Method != http.MethodPost {
 		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
 		return
@@ -126,6 +135,15 @@ func (h *APIHandler) HandleScrape(w http.ResponseWriter, r *http.Request) {
 
 // HandleJobStatus handles job status requests
 func (h *APIHandler) HandleJobStatus(w http.ResponseWriter, r *http.Request) {
+	// Simple bearer token auth if configured
+	if h.config.APIToken != "" {
+		auth := r.Header.Get("Authorization")
+		const prefix = "Bearer "
+		if len(auth) <= len(prefix) || auth[:len(prefix)] != prefix || auth[len(prefix):] != h.config.APIToken {
+			http.Error(w, "Unauthorized", http.StatusUnauthorized)
+			return
+		}
+	}
 	if r.Method != http.MethodGet {
 		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
 		return

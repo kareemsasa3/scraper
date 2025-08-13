@@ -3,7 +3,7 @@
 # Test script to validate GitHub Actions workflows locally
 # This helps catch issues before pushing to GitHub
 
-set -e
+set -euo pipefail
 
 echo "🧪 Testing GitHub Actions Workflows Locally"
 echo "=========================================="

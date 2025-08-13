@@ -29,21 +29,30 @@ func (s *HeadlessStrategy) Execute(ctx context.Context, urlStr string, cfg *conf
 	taskCtx, cancel := context.WithTimeout(ctx, cfg.RequestTimeout)
 	defer cancel()
 
-	// Create chromedp context with options that ignore SSL errors
+	// Create chromedp context with options; security-related flags are configurable
 	opts := append(chromedp.DefaultExecAllocatorOptions[:],
 		// Create a temporary, disposable user profile for this scrape
 		chromedp.Flag("user-data-dir", os.TempDir()+"/go-scraper-profile"),
 		// --- Best Practice Flags for a Clean Run ---
 		chromedp.Flag("headless", true),
-		chromedp.Flag("no-sandbox", true),
 		chromedp.Flag("disable-gpu", true),
 		chromedp.Flag("disable-extensions", true),
 		chromedp.Flag("no-first-run", true),
 		chromedp.Flag("no-default-browser-check", true),
-		// SSL/security flags for test sites
-		chromedp.Flag("ignore-certificate-errors", true),
-		chromedp.Flag("ignore-ssl-errors", true),
 	)
+
+	// Only enable no-sandbox when explicitly configured (not recommended in prod)
+	if cfg.HeadlessNoSandbox {
+		opts = append(opts, chromedp.Flag("no-sandbox", true))
+	}
+
+	// Only ignore SSL errors when explicitly configured
+	if cfg.HeadlessIgnoreCertErrors {
+		opts = append(opts,
+			chromedp.Flag("ignore-certificate-errors", true),
+			chromedp.Flag("ignore-ssl-errors", true),
+		)
+	}
 
 	allocCtx, cancel := chromedp.NewExecAllocator(taskCtx, opts...)
 	defer cancel()

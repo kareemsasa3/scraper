@@ -3,7 +3,7 @@
 # Robust Performance Test for Arachne Web Scraper
 # Improved version with better error handling and polling
 
-set -e
+set -euo pipefail
 
 # Colors for output
 GREEN='\033[0;32m'
@@ -29,6 +29,10 @@ log_warning() {
 log_error() {
     echo -e "${RED}[ERROR]${NC} $1"
 }
+
+# Ensure required tools
+command -v curl >/dev/null 2>&1 || { log_error "curl not found"; exit 1; }
+command -v jq >/dev/null 2>&1 || { log_error "jq not found"; exit 1; }
 
 # Check API health
 check_health() {
