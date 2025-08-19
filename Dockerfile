@@ -20,7 +20,7 @@ COPY . .
 RUN CGO_ENABLED=0 GOOS=linux go build -a -installsuffix cgo -o main ./cmd/arachne/main.go
 
 # Final stage
-FROM alpine:latest
+FROM alpine:3.20
 
 # Install Chrome and dependencies for headless browsing
 RUN apk --no-cache add \
@@ -28,9 +28,7 @@ RUN apk --no-cache add \
     chromium \
     nss \
     freetype \
-    freetype-dev \
     harfbuzz \
-    ca-certificates \
     ttf-freefont \
     && rm -rf /var/cache/apk/*
 
