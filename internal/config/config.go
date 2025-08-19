@@ -39,9 +39,9 @@ type Config struct {
 func DefaultConfig() *Config {
 	return &Config{
 		MaxConcurrent:            3,
-		RequestTimeout:           10 * time.Second,
-		TotalTimeout:             30 * time.Second,
-		UserAgent:                "Go-Scraper/2.0",
+		RequestTimeout:           20 * time.Second,
+		TotalTimeout:             45 * time.Second,
+		UserAgent:                "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/118.0.0.0 Safari/537.36",
 		OutputFile:               "scraping_results.json",
 		RetryAttempts:            3,
 		RetryDelay:               1 * time.Second,

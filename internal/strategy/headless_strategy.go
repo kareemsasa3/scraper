@@ -44,6 +44,12 @@ func (s *HeadlessStrategy) Execute(ctx context.Context, urlStr string, cfg *conf
 	// Only enable no-sandbox when explicitly configured (not recommended in prod)
 	if cfg.HeadlessNoSandbox {
 		opts = append(opts, chromedp.Flag("no-sandbox", true))
+		// Additional stability flags commonly used in containerized Chrome
+		opts = append(opts,
+			chromedp.Flag("disable-dev-shm-usage", true),
+			chromedp.Flag("no-zygote", true),
+			chromedp.Flag("single-process", true),
+		)
 	}
 
 	// Only ignore SSL errors when explicitly configured
@@ -72,8 +78,16 @@ func (s *HeadlessStrategy) Execute(ctx context.Context, urlStr string, cfg *conf
 		// Wait for the page to load (wait for body to be ready)
 		chromedp.WaitReady("body", chromedp.ByQuery),
 
-		// Wait a bit for JavaScript to execute
-		chromedp.Sleep(3*time.Second),
+		// Give JS more time and trigger lazy-loaded content
+		chromedp.Sleep(4*time.Second),
+		chromedp.ActionFunc(func(ctx context.Context) error {
+			for i := 0; i < 6; i++ {
+				_ = chromedp.Evaluate(`window.scrollTo(0, document.body.scrollHeight);`, nil).Do(ctx)
+				time.Sleep(800 * time.Millisecond)
+			}
+			return nil
+		}),
+		chromedp.Sleep(2*time.Second),
 
 		// Extract the page title
 		chromedp.Title(&title),
@@ -90,6 +104,23 @@ func (s *HeadlessStrategy) Execute(ctx context.Context, urlStr string, cfg *conf
 	doc, err := goquery.NewDocumentFromReader(strings.NewReader(body))
 	if err != nil {
 		return nil, errors.NewScraperError(urlStr, "Failed to parse HTML", err)
+	}
+
+	// Try to enrich title from Open Graph tags (company/site_name + title)
+	if ogTitle, exists := doc.Find("meta[property='og:title']").Attr("content"); exists {
+		ogTitle = strings.TrimSpace(ogTitle)
+		if len(ogTitle) > 0 {
+			if siteName, ok := doc.Find("meta[property='og:site_name']").Attr("content"); ok {
+				siteName = strings.TrimSpace(siteName)
+				if len(siteName) > 0 {
+					title = fmt.Sprintf("%s - %s", siteName, ogTitle)
+				} else {
+					title = ogTitle
+				}
+			} else {
+				title = ogTitle
+			}
+		}
 	}
 
 	// Extract next URL using CSS selector
