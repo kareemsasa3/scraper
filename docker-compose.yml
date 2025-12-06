@@ -19,6 +19,8 @@ services:
   scraper:
     build: .
     container_name: scraper-app
+    # Chrome requires adequate shared memory for rendering
+    shm_size: '2gb'
     ports:
       - "${ARACHNE_PORT:-8080}:${ARACHNE_PORT:-8080}"
     environment:
@@ -31,6 +33,7 @@ services:
       - SCRAPER_REQUEST_TIMEOUT=${ARACHNE_REQUEST_TIMEOUT:-120s}
       - SCRAPER_TOTAL_TIMEOUT=${ARACHNE_TOTAL_TIMEOUT:-180s}
       - SCRAPER_USE_HEADLESS=${ARACHNE_USE_HEADLESS:-true}
+      - SCRAPER_HEADLESS_NO_SANDBOX=${ARACHNE_HEADLESS_NO_SANDBOX:-true}
       - SCRAPER_USER_AGENT=${ARACHNE_USER_AGENT:-Mozilla/5.0 (compatible; PortfolioBot/1.0)}
       - SCRAPER_RATE_LIMIT=${ARACHNE_RATE_LIMIT:-2}
       - SCRAPER_RATE_LIMIT_WINDOW=${ARACHNE_RATE_LIMIT_WINDOW:-1s}
@@ -54,6 +57,7 @@ services:
     restart: unless-stopped
     volumes:
       - ./scraping_results:/app/results
+      - ./data:/app/data
 
   # Optional: Redis Commander for Redis management UI
   redis-commander:
