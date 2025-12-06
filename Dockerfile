@@ -4,6 +4,9 @@ FROM golang:1.23-alpine AS builder
 # Install git and ca-certificates (needed for go mod download)
 RUN apk add --no-cache git ca-certificates
 
+# Install gcc, musl-dev, sqlite-dev
+RUN apk add --no-cache gcc musl-dev sqlite-dev
+
 # Set working directory
 WORKDIR /app
 
@@ -16,8 +19,8 @@ RUN go mod download
 # Copy source code (including cmd/, internal/, pkg/)
 COPY . .
 
-# Build the application (entrypoint is now at cmd/arachne/main.go)
-RUN CGO_ENABLED=0 GOOS=linux go build -a -installsuffix cgo -o main ./cmd/arachne/main.go
+# Build the application (entrypoint is now at cmd/arachne)
+RUN CGO_ENABLED=1 GOOS=linux go build -a -o main ./cmd/arachne
 
 # Final stage
 FROM alpine:3.20
@@ -30,6 +33,7 @@ RUN apk --no-cache add \
     freetype \
     harfbuzz \
     ttf-freefont \
+    sqlite-libs \
     && rm -rf /var/cache/apk/*
 
 # Set environment variable for Chrome

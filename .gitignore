@@ -56,6 +56,9 @@ temp/
 # Docker volumes and data
 redis_data/
 scraping_results/
+data/*.db
+data/*.db-shm
+data/*.db-wal
 
 # Local development files
 main
