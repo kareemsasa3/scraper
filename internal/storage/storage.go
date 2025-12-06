@@ -303,8 +303,9 @@ func (m *InMemoryStorage) Close() error {
 
 // ScrapeRequest represents a scraping request
 type ScrapeRequest struct {
-	URLs    []string `json:"urls"`
-	SiteURL string   `json:"site_url,omitempty"`
+	URLs              []string                 `json:"urls"`
+	SiteURL           string                   `json:"site_url,omitempty"`
+	PaginationConfig  *types.PaginationConfig  `json:"pagination_config,omitempty"`
 }
 
 // ScrapingJob represents an asynchronous scraping job
