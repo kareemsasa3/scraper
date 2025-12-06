@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"log"
 	"os"
-	"strings"
 	"time"
 
 	"github.com/kareemsasa3/arachne/internal/api"
@@ -40,7 +39,13 @@ func main() {
 		fmt.Printf("🚀 Starting Scraper API Server on port %d...\n", port)
 		fmt.Printf("Configuration: %s\n", cfg.String())
 
-		if err := api.StartAPIServer(s, cfg, port); err != nil {
+		// Set database path - use environment variable or default
+		dbPath := os.Getenv("SCRAPER_DB_PATH")
+		if dbPath == "" {
+			dbPath = "/app/data/snapshots.db"
+		}
+
+		if err := api.StartAPIServer(s, cfg, port, dbPath); err != nil {
 			log.Fatalf("Failed to start API server: %v", err)
 		}
 	} else {
@@ -81,28 +86,55 @@ func setupConfig() *config.Config {
 	cfg := config.LoadConfig()
 
 	// Override with command-line flags (only if explicitly set)
-	cfg.MaxConcurrent = *maxConcurrent
-	cfg.RequestTimeout = *requestTimeout
-	cfg.TotalTimeout = *totalTimeout
-	cfg.OutputFile = *outputFile
-	cfg.RetryAttempts = *retryAttempts
-	cfg.RetryDelay = *retryDelay
-	cfg.LogLevel = *logLevel
-	cfg.EnableMetrics = *enableMetrics
-	cfg.EnableLogging = *enableLogging
-	cfg.UserAgent = *userAgent
-	// Only override UseHeadless if the headless flag was explicitly provided
-	if len(os.Args) > 1 {
-		for _, arg := range os.Args[1:] {
-			if strings.HasPrefix(arg, "-headless") {
-				cfg.UseHeadless = *useHeadless
-				break
-			}
-		}
+	// Use flag.Visit to track which flags were actually provided
+	providedFlags := make(map[string]bool)
+	flag.Visit(func(f *flag.Flag) {
+		providedFlags[f.Name] = true
+	})
+
+	// Only override if explicitly set via command-line flags
+	if providedFlags["concurrent"] {
+		cfg.MaxConcurrent = *maxConcurrent
 	}
-	cfg.MaxPages = *maxPages
-	cfg.StorageBackend = *storageBackend
-	cfg.EnablePlugins = *enablePlugins
+	if providedFlags["timeout"] {
+		cfg.RequestTimeout = *requestTimeout
+	}
+	if providedFlags["total-timeout"] {
+		cfg.TotalTimeout = *totalTimeout
+	}
+	if providedFlags["output"] {
+		cfg.OutputFile = *outputFile
+	}
+	if providedFlags["retries"] {
+		cfg.RetryAttempts = *retryAttempts
+	}
+	if providedFlags["retry-delay"] {
+		cfg.RetryDelay = *retryDelay
+	}
+	if providedFlags["log-level"] {
+		cfg.LogLevel = *logLevel
+	}
+	if providedFlags["metrics"] {
+		cfg.EnableMetrics = *enableMetrics
+	}
+	if providedFlags["logging"] {
+		cfg.EnableLogging = *enableLogging
+	}
+	if providedFlags["user-agent"] {
+		cfg.UserAgent = *userAgent
+	}
+	if providedFlags["headless"] {
+		cfg.UseHeadless = *useHeadless
+	}
+	if providedFlags["max-pages"] {
+		cfg.MaxPages = *maxPages
+	}
+	if providedFlags["storage"] {
+		cfg.StorageBackend = *storageBackend
+	}
+	if providedFlags["plugins"] {
+		cfg.EnablePlugins = *enablePlugins
+	}
 
 	// Validate configuration
 	if err := cfg.Validate(); err != nil {
