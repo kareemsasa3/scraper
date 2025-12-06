@@ -7,6 +7,7 @@ This directory contains comprehensive documentation for the Arachne web scraper 
 ### 🚀 Getting Started
 - **[README.md](../README.md)** - Main project overview and quick start guide
 - **[RUNNING.md](RUNNING.md)** - Detailed instructions for running the scraper
+- **[PAGINATION.md](PAGINATION.md)** - Flexible pagination configuration guide
 
 ### 🛠️ Development
 - **[CONTRIBUTING.md](CONTRIBUTING.md)** - Guidelines for contributing to the project
@@ -26,7 +27,8 @@ This directory contains comprehensive documentation for the Arachne web scraper 
 ### For New Users
 1. Start with the main [README.md](../README.md) for project overview
 2. Read [RUNNING.md](RUNNING.md) for detailed usage instructions
-3. Check [scripts/README.md](../scripts/README.md) for available tools
+3. Learn about [PAGINATION.md](PAGINATION.md) for multi-page scraping
+4. Check [scripts/README.md](../scripts/README.md) for available tools
 
 ### For Contributors
 1. Review [CONTRIBUTING.md](CONTRIBUTING.md) for development guidelines

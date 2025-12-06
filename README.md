@@ -28,6 +28,7 @@
 
 - **🚀 Asynchronous API**: Submit scraping jobs and poll for results later.
 - **💾 Persistent Job State**: Redis backend ensures jobs survive restarts and crashes.
+- **🔗 Flexible Pagination**: Configurable multi-page scraping with custom CSS selectors and validation.
 - **🏆 Proven Performance**: Successfully scraped 92.5% of 40+ real-world, challenging sites.
 - **🐳 Fully Containerized**: Get started in minutes with a single `docker-compose up` command.
 - **🤖 Automated CI/CD**: Every commit is tested, and every release is built and published automatically.
@@ -99,6 +100,18 @@ This will return a `job_id`.
 curl "http://localhost:8080/scrape/status?id=<job_id>" | jq
 ```
 
+**Scrape a Site with Pagination:**
+
+```bash
+curl -X POST http://localhost:8080/scrape \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "site_url": "https://quotes.toscrape.com/page/1/"
+  }'
+```
+
+This will automatically follow pagination links and scrape all pages. For custom pagination configuration, see the [Pagination Documentation](docs/PAGINATION.md).
+
 ## 🏗️ Architecture & Design
 
 ### Architecture Overview
@@ -134,6 +147,9 @@ Environment variables can be set in a `.env` file. See `.env.example` for a full
 | `SCRAPER_REDIS_ADDR` | Redis host | `redis:6379` |
 | `SCRAPER_MAX_CONCURRENT` | Max concurrent scraping requests | `5` |
 | `SCRAPER_REQUEST_TIMEOUT` | Timeout for each HTTP request | `10s` |
+| `SCRAPER_USE_HEADLESS` | Enable headless Chrome for JS rendering | `false` |
+| `SCRAPER_HEADLESS_NO_SANDBOX` | Disable Chrome sandbox (required for Docker) | `false` |
+| `SCRAPER_HEADLESS_IGNORE_CERT_ERRORS` | Ignore SSL certificate errors | `false` |
 
 ## 🧪 Testing
 
@@ -167,6 +183,7 @@ For detailed testing information, see [tests/README.md](tests/README.md).
 Comprehensive documentation is available in the [`docs/`](docs/) directory:
 
 - **[📖 Documentation Index](docs/README.md)** - Complete guide to all documentation
+- **[🔗 Pagination Guide](docs/PAGINATION.md)** - Flexible pagination configuration and examples
 - **[🚀 Running Guide](docs/RUNNING.md)** - Detailed instructions for running the scraper
 - **[🛠️ Contributing Guide](docs/CONTRIBUTING.md)** - Development guidelines and setup
 - **[🤖 CI/CD Setup](docs/GITHUB_ACTIONS_SETUP.md)** - Automated pipeline configuration
