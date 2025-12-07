@@ -885,10 +885,7 @@ func buildUnifiedDiff(oldText, newText string) (string, int, int) {
 }
 
 func countLines(text string) int {
-	if text == "" {
-		return 0
-	}
-	return len(strings.Split(text, "\n"))
+	return strings.Count(text, "\n")
 }
 
 // corsMiddleware wraps an HTTP handler with CORS headers
