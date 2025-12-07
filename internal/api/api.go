@@ -13,6 +13,7 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
+	"github.com/sergi/go-diff/diffmatchpatch"
 
 	"github.com/kareemsasa3/arachne/internal/config"
 	"github.com/kareemsasa3/arachne/internal/database"
@@ -332,6 +333,54 @@ type SnapshotResponse struct {
 	StatusCode    int       `json:"status_code"`
 }
 
+// HistoryEntryResponse represents a single history entry for a URL.
+type HistoryEntryResponse struct {
+	ID            string    `json:"id"`
+	URL           string    `json:"url"`
+	Domain        string    `json:"domain"`
+	Title         string    `json:"title"`
+	ContentHash   string    `json:"content_hash"`
+	PreviousHash  string    `json:"previous_hash,omitempty"`
+	HasChanges    bool      `json:"has_changes"`
+	ChangeSummary string    `json:"change_summary,omitempty"`
+	Summary       string    `json:"summary,omitempty"`
+	ScrapedAt     time.Time `json:"scraped_at"`
+	LastCheckedAt time.Time `json:"last_checked_at"`
+	StatusCode    int       `json:"status_code"`
+}
+
+// VersionResponse represents a full snapshot version.
+type VersionResponse struct {
+	ID            string    `json:"id"`
+	URL           string    `json:"url"`
+	Domain        string    `json:"domain"`
+	Title         string    `json:"title"`
+	ContentHash   string    `json:"content_hash"`
+	PreviousHash  string    `json:"previous_hash,omitempty"`
+	HasChanges    bool      `json:"has_changes"`
+	Summary       string    `json:"summary,omitempty"`
+	ChangeSummary string    `json:"change_summary,omitempty"`
+	CleanText     string    `json:"clean_text,omitempty"`
+	RawContent    string    `json:"raw_content,omitempty"`
+	ScrapedAt     time.Time `json:"scraped_at"`
+	LastCheckedAt time.Time `json:"last_checked_at"`
+	StatusCode    int       `json:"status_code"`
+}
+
+// DiffResponse represents a diff between two versions.
+type DiffResponse struct {
+	URL           string    `json:"url"`
+	FromID        string    `json:"from_id"`
+	ToID          string    `json:"to_id"`
+	FromTimestamp time.Time `json:"from_timestamp"`
+	ToTimestamp   time.Time `json:"to_timestamp"`
+	FromHash      string    `json:"from_hash"`
+	ToHash        string    `json:"to_hash"`
+	Diff          string    `json:"diff"`
+	LinesAdded    int       `json:"lines_added"`
+	LinesRemoved  int       `json:"lines_removed"`
+}
+
 // HandleMemoryLookup handles memory lookup requests
 func (h *APIHandler) HandleMemoryLookup(w http.ResponseWriter, r *http.Request) {
 	// Simple bearer token auth if configured
@@ -492,6 +541,198 @@ func (h *APIHandler) HandleMemoryRecent(w http.ResponseWriter, r *http.Request) 
 	}
 }
 
+// HandleScrapeHistory returns all versions for a given URL.
+func (h *APIHandler) HandleScrapeHistory(w http.ResponseWriter, r *http.Request) {
+	if h.config.APIToken != "" {
+		auth := r.Header.Get("Authorization")
+		const prefix = "Bearer "
+		if len(auth) <= len(prefix) || auth[:len(prefix)] != prefix || auth[len(prefix):] != h.config.APIToken {
+			http.Error(w, "Unauthorized", http.StatusUnauthorized)
+			return
+		}
+	}
+
+	if r.Method != http.MethodGet {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	if h.database == nil {
+		http.Error(w, "Memory database not available", http.StatusServiceUnavailable)
+		return
+	}
+
+	rawURL := r.URL.Query().Get("url")
+	if rawURL == "" {
+		http.Error(w, "url query parameter is required", http.StatusBadRequest)
+		return
+	}
+
+	decodedURL, err := url.QueryUnescape(rawURL)
+	if err != nil {
+		http.Error(w, "invalid url encoding", http.StatusBadRequest)
+		return
+	}
+
+	history, err := h.database.GetHistoryByURL(decodedURL)
+	if err != nil {
+		http.Error(w, fmt.Sprintf("Database error: %v", err), http.StatusInternalServerError)
+		return
+	}
+
+	entries := make([]HistoryEntryResponse, 0, len(history))
+	for _, snap := range history {
+		entries = append(entries, mapSnapshotToHistoryResponse(snap))
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	if err := json.NewEncoder(w).Encode(entries); err != nil {
+		http.Error(w, "Failed to encode response", http.StatusInternalServerError)
+		return
+	}
+}
+
+// HandleScrapeVersion returns a specific version by ID.
+func (h *APIHandler) HandleScrapeVersion(w http.ResponseWriter, r *http.Request) {
+	if h.config.APIToken != "" {
+		auth := r.Header.Get("Authorization")
+		const prefix = "Bearer "
+		if len(auth) <= len(prefix) || auth[:len(prefix)] != prefix || auth[len(prefix):] != h.config.APIToken {
+			http.Error(w, "Unauthorized", http.StatusUnauthorized)
+			return
+		}
+	}
+
+	if r.Method != http.MethodGet {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	if h.database == nil {
+		http.Error(w, "Memory database not available", http.StatusServiceUnavailable)
+		return
+	}
+
+	parts := strings.Split(strings.TrimSuffix(r.URL.Path, "/"), "/")
+	if len(parts) < 5 {
+		http.Error(w, "Invalid URL path", http.StatusBadRequest)
+		return
+	}
+	id := parts[len(parts)-1]
+	if id == "" {
+		http.Error(w, "Missing version ID", http.StatusBadRequest)
+		return
+	}
+
+	snap, err := h.database.GetSnapshotByID(id)
+	if err != nil {
+		http.Error(w, fmt.Sprintf("Database error: %v", err), http.StatusInternalServerError)
+		return
+	}
+	if snap == nil {
+		http.Error(w, "Version not found", http.StatusNotFound)
+		return
+	}
+
+	resp := mapSnapshotToVersionResponse(snap)
+	w.Header().Set("Content-Type", "application/json")
+	if err := json.NewEncoder(w).Encode(resp); err != nil {
+		http.Error(w, "Failed to encode response", http.StatusInternalServerError)
+		return
+	}
+}
+
+// HandleScrapeDiff returns a unified diff between two versions.
+func (h *APIHandler) HandleScrapeDiff(w http.ResponseWriter, r *http.Request) {
+	if h.config.APIToken != "" {
+		auth := r.Header.Get("Authorization")
+		const prefix = "Bearer "
+		if len(auth) <= len(prefix) || auth[:len(prefix)] != prefix || auth[len(prefix):] != h.config.APIToken {
+			http.Error(w, "Unauthorized", http.StatusUnauthorized)
+			return
+		}
+	}
+
+	if r.Method != http.MethodGet {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	if h.database == nil {
+		http.Error(w, "Memory database not available", http.StatusServiceUnavailable)
+		return
+	}
+
+	query := r.URL.Query()
+	rawURL := query.Get("url")
+	fromTs := query.Get("from")
+	toTs := query.Get("to")
+
+	if rawURL == "" || fromTs == "" || toTs == "" {
+		http.Error(w, "url, from, and to query parameters are required", http.StatusBadRequest)
+		return
+	}
+
+	decodedURL, err := url.QueryUnescape(rawURL)
+	if err != nil {
+		http.Error(w, "invalid url encoding", http.StatusBadRequest)
+		return
+	}
+
+	fromTime, err := time.Parse(time.RFC3339, fromTs)
+	if err != nil {
+		http.Error(w, "invalid from timestamp, use RFC3339", http.StatusBadRequest)
+		return
+	}
+
+	toTime, err := time.Parse(time.RFC3339, toTs)
+	if err != nil {
+		http.Error(w, "invalid to timestamp, use RFC3339", http.StatusBadRequest)
+		return
+	}
+
+	fromSnap, err := h.database.GetSnapshotByTimestamp(decodedURL, fromTime)
+	if err != nil {
+		http.Error(w, fmt.Sprintf("Database error: %v", err), http.StatusInternalServerError)
+		return
+	}
+	if fromSnap == nil {
+		http.Error(w, "from version not found", http.StatusNotFound)
+		return
+	}
+
+	toSnap, err := h.database.GetSnapshotByTimestamp(decodedURL, toTime)
+	if err != nil {
+		http.Error(w, fmt.Sprintf("Database error: %v", err), http.StatusInternalServerError)
+		return
+	}
+	if toSnap == nil {
+		http.Error(w, "to version not found", http.StatusNotFound)
+		return
+	}
+
+	diffText, added, removed := buildUnifiedDiff(contentForDiff(fromSnap), contentForDiff(toSnap))
+
+	resp := DiffResponse{
+		URL:           decodedURL,
+		FromID:        fromSnap.ID,
+		ToID:          toSnap.ID,
+		FromTimestamp: fromSnap.ScrapedAt,
+		ToTimestamp:   toSnap.ScrapedAt,
+		FromHash:      fromSnap.ContentHash,
+		ToHash:        toSnap.ContentHash,
+		Diff:          diffText,
+		LinesAdded:    added,
+		LinesRemoved:  removed,
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	if err := json.NewEncoder(w).Encode(resp); err != nil {
+		http.Error(w, "Failed to encode response", http.StatusInternalServerError)
+		return
+	}
+}
+
 // UpdateSummaryRequest represents the request to update a snapshot's summary
 type UpdateSummaryRequest struct {
 	Summary string `json:"summary"`
@@ -573,6 +814,83 @@ func (h *APIHandler) HandleUpdateSnapshotSummary(w http.ResponseWriter, r *http.
 	}
 }
 
+func mapSnapshotToHistoryResponse(snapshot *database.Snapshot) HistoryEntryResponse {
+	return HistoryEntryResponse{
+		ID:            snapshot.ID,
+		URL:           snapshot.URL,
+		Domain:        snapshot.Domain,
+		Title:         snapshot.Title,
+		ContentHash:   snapshot.ContentHash,
+		PreviousHash:  snapshot.PreviousHash,
+		HasChanges:    snapshot.HasChanges,
+		ChangeSummary: snapshot.ChangeSummary,
+		Summary:       snapshot.Summary,
+		ScrapedAt:     snapshot.ScrapedAt,
+		LastCheckedAt: snapshot.LastCheckedAt,
+		StatusCode:    snapshot.StatusCode,
+	}
+}
+
+func mapSnapshotToVersionResponse(snapshot *database.Snapshot) VersionResponse {
+	return VersionResponse{
+		ID:            snapshot.ID,
+		URL:           snapshot.URL,
+		Domain:        snapshot.Domain,
+		Title:         snapshot.Title,
+		ContentHash:   snapshot.ContentHash,
+		PreviousHash:  snapshot.PreviousHash,
+		HasChanges:    snapshot.HasChanges,
+		Summary:       snapshot.Summary,
+		ChangeSummary: snapshot.ChangeSummary,
+		CleanText:     snapshot.CleanText,
+		RawContent:    snapshot.RawContent,
+		ScrapedAt:     snapshot.ScrapedAt,
+		LastCheckedAt: snapshot.LastCheckedAt,
+		StatusCode:    snapshot.StatusCode,
+	}
+}
+
+func contentForDiff(snapshot *database.Snapshot) string {
+	if snapshot == nil {
+		return ""
+	}
+	if snapshot.RawContent != "" {
+		return snapshot.RawContent
+	}
+	return snapshot.CleanText
+}
+
+// buildUnifiedDiff returns a unified diff string plus added/removed line counts.
+func buildUnifiedDiff(oldText, newText string) (string, int, int) {
+	dmp := diffmatchpatch.New()
+	text1, text2, lines := dmp.DiffLinesToChars(oldText, newText)
+	diffs := dmp.DiffMain(text1, text2, false)
+	diffs = dmp.DiffCharsToLines(diffs, lines)
+
+	added := 0
+	removed := 0
+	for _, d := range diffs {
+		switch d.Type {
+		case diffmatchpatch.DiffInsert:
+			added += countLines(d.Text)
+		case diffmatchpatch.DiffDelete:
+			removed += countLines(d.Text)
+		}
+	}
+
+	patches := dmp.PatchMake(oldText, newText)
+	diffText := dmp.PatchToText(patches)
+
+	return diffText, added, removed
+}
+
+func countLines(text string) int {
+	if text == "" {
+		return 0
+	}
+	return len(strings.Split(text, "\n"))
+}
+
 // corsMiddleware wraps an HTTP handler with CORS headers
 func corsMiddleware(next http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
@@ -639,6 +957,9 @@ func StartAPIServer(scraper ScraperInterface, cfg *config.Config, port int, dbPa
 	http.HandleFunc("/memory/lookup", corsMiddleware(handler.HandleMemoryLookup))
 	http.HandleFunc("/memory/recent", corsMiddleware(handler.HandleMemoryRecent))
 	http.HandleFunc("/memory/snapshot/", corsMiddleware(handler.HandleUpdateSnapshotSummary)) // Handles /memory/snapshot/{id}/summary
+	http.HandleFunc("/api/scrapes/history", corsMiddleware(handler.HandleScrapeHistory))
+	http.HandleFunc("/api/scrapes/version/", corsMiddleware(handler.HandleScrapeVersion))
+	http.HandleFunc("/api/scrapes/diff", corsMiddleware(handler.HandleScrapeDiff))
 
 	// Prometheus metrics endpoint (wrapped with CORS handler)
 	http.Handle("/prometheus", corsMiddleware(func(w http.ResponseWriter, r *http.Request) {
@@ -656,6 +977,9 @@ func StartAPIServer(scraper ScraperInterface, cfg *config.Config, port int, dbPa
 	fmt.Printf("   GET   /memory/lookup?url=<url> - Check memory for URL\n")
 	fmt.Printf("   GET   /memory/recent?limit=N&offset=M - Get recent snapshots\n")
 	fmt.Printf("   PATCH /memory/snapshot/:id/summary - Update snapshot summary\n")
+	fmt.Printf("   GET   /api/scrapes/history?url=<url> - Get version history for URL\n")
+	fmt.Printf("   GET   /api/scrapes/version/:id - Get a specific version by ID\n")
+	fmt.Printf("   GET   /api/scrapes/diff?url=<url>&from=<ts>&to=<ts> - Diff two versions\n")
 	fmt.Printf("   GET   /prometheus - Prometheus metrics\n")
 
 	return http.ListenAndServe(addr, nil)
