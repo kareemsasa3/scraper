@@ -62,4 +62,6 @@ data/*.db-wal
 
 # Local development files
 main
-*.local 
+*.local data/*.db
+data/*.db-shm
+data/*.db-wal

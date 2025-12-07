@@ -6,10 +6,10 @@ import (
 	"encoding/hex"
 	"fmt"
 	"net/url"
+	"strconv"
 	"strings"
 	"time"
 
-	"github.com/google/uuid"
 	_ "github.com/mattn/go-sqlite3"
 )
 
@@ -27,19 +27,23 @@ type DB struct {
 	logger Logger
 }
 
-// Snapshot represents a web page snapshot in the database
+// Snapshot represents a scrape history entry in the database.
+// We keep the name for backward compatibility with the API layer.
 type Snapshot struct {
-	ID              string    `json:"id"`
-	URL             string    `json:"url"`
-	Domain          string    `json:"domain"`
-	ContentHash     string    `json:"content_hash"`
-	Title           string    `json:"title"`
-	CleanText       string    `json:"clean_text"`
-	RawHTML         string    `json:"raw_html,omitempty"`
-	Summary         string    `json:"summary,omitempty"`
-	ScrapedAt       time.Time `json:"scraped_at"`
-	LastCheckedAt   time.Time `json:"last_checked_at"`
-	StatusCode      int       `json:"status_code"`
+	ID            string    `json:"id"`
+	URL           string    `json:"url"`
+	Domain        string    `json:"domain"`
+	ContentHash   string    `json:"content_hash"`
+	Title         string    `json:"title"`
+	CleanText     string    `json:"clean_text"`
+	RawContent    string    `json:"raw_content,omitempty"`
+	Summary       string    `json:"summary,omitempty"`
+	ScrapedAt     time.Time `json:"scraped_at"`
+	LastCheckedAt time.Time `json:"last_checked_at"`
+	StatusCode    int       `json:"status_code"`
+	PreviousHash  string    `json:"previous_hash,omitempty"`
+	HasChanges    bool      `json:"has_changes"`
+	ChangeSummary string    `json:"change_summary,omitempty"`
 }
 
 // Initialize creates a new database connection and runs migrations
@@ -76,65 +80,122 @@ func Initialize(dbPath string, log Logger) (*DB, error) {
 	return db, nil
 }
 
-// migrate creates the schema if it doesn't exist
+// migrate creates or updates the schema to the unified scrape_history table.
 func (db *DB) migrate() error {
-	schema := `
-	CREATE TABLE IF NOT EXISTS snapshots (
-		id TEXT PRIMARY KEY,
-		url TEXT NOT NULL,
-		domain TEXT NOT NULL,
-		content_hash TEXT NOT NULL,
-		
-		-- Content fields
-		title TEXT,
-		clean_text TEXT,
-		raw_html TEXT,
-		summary TEXT,
-		
-		-- Metadata
-		scraped_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-		last_checked_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-		status_code INTEGER
-	);
-
-	-- Indexes for fast lookups
-	CREATE INDEX IF NOT EXISTS idx_url ON snapshots(url);
-	CREATE INDEX IF NOT EXISTS idx_domain ON snapshots(domain);
-	CREATE INDEX IF NOT EXISTS idx_content_hash ON snapshots(content_hash);
-	CREATE INDEX IF NOT EXISTS idx_scraped_at ON snapshots(scraped_at DESC);
-	CREATE INDEX IF NOT EXISTS idx_url_hash ON snapshots(url, content_hash);
-	`
-
-	if _, err := db.conn.Exec(schema); err != nil {
-		return fmt.Errorf("failed to create schema: %w", err)
+	if err := db.createHistoryTable(); err != nil {
+		return err
 	}
 
-	// Migration: Add summary column if it doesn't exist (for existing databases)
-	addSummaryColumn := `
-	ALTER TABLE snapshots ADD COLUMN summary TEXT;
-	`
-	
-	// Try to add the column - will fail silently if it already exists
-	_, err := db.conn.Exec(addSummaryColumn)
-	if err != nil {
-		// Check if error is "duplicate column name" which is expected
-		if !strings.Contains(err.Error(), "duplicate column") {
-			db.logger.Warn("Note: summary column may already exist or migration skipped: %v", err)
-		}
-	} else {
-		db.logger.Info("Added summary column to snapshots table")
+	if err := db.migrateSnapshotsToHistory(); err != nil {
+		return err
 	}
 
 	return nil
 }
 
-// SaveSnapshot saves or updates a snapshot in the database
-// If the URL exists with the same content_hash, only last_checked_at is updated
-// If the content_hash differs, a new snapshot is created
+func (db *DB) createHistoryTable() error {
+	schema := `
+	CREATE TABLE IF NOT EXISTS scrape_history (
+		id INTEGER PRIMARY KEY AUTOINCREMENT,
+		url TEXT NOT NULL,
+		domain TEXT,
+		title TEXT,
+		clean_text TEXT,
+		raw_content TEXT NOT NULL,
+		summary TEXT,
+		content_hash TEXT NOT NULL,
+		previous_hash TEXT,
+		has_changes INTEGER DEFAULT 0,
+		change_summary TEXT,
+		status_code INTEGER,
+		scraped_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+		last_checked_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+	);
+
+	CREATE INDEX IF NOT EXISTS idx_history_url_time ON scrape_history(url, scraped_at DESC);
+	CREATE INDEX IF NOT EXISTS idx_history_hash ON scrape_history(content_hash);
+	CREATE INDEX IF NOT EXISTS idx_history_url_hash ON scrape_history(url, content_hash);
+	`
+
+	if _, err := db.conn.Exec(schema); err != nil {
+		return fmt.Errorf("failed to create scrape_history schema: %w", err)
+	}
+
+	return nil
+}
+
+// migrateSnapshotsToHistory copies data from the legacy snapshots table (if present)
+// into scrape_history and then drops the legacy table.
+func (db *DB) migrateSnapshotsToHistory() (retErr error) {
+	var oldTableCount int
+	if err := db.conn.QueryRow(
+		"SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='snapshots'",
+	).Scan(&oldTableCount); err != nil {
+		return fmt.Errorf("failed to check legacy snapshots table: %w", err)
+	}
+
+	if oldTableCount == 0 {
+		return nil
+	}
+
+	tx, err := db.conn.Begin()
+	if err != nil {
+		return fmt.Errorf("failed to start migration transaction: %w", err)
+	}
+	defer func() {
+		if retErr != nil {
+			_ = tx.Rollback()
+		}
+	}()
+
+	var historyCount int
+	if err := tx.QueryRow("SELECT COUNT(*) FROM scrape_history").Scan(&historyCount); err != nil {
+		retErr = fmt.Errorf("failed to count scrape_history rows: %w", err)
+		return retErr
+	}
+
+	if historyCount == 0 {
+		if _, err := tx.Exec(`
+			INSERT INTO scrape_history (
+				url, domain, title, clean_text, raw_content, summary, content_hash,
+				status_code, scraped_at, last_checked_at
+			)
+			SELECT
+				url, domain, title, clean_text,
+				COALESCE(raw_html, clean_text, ''),
+				summary, content_hash, status_code, scraped_at, last_checked_at
+			FROM snapshots
+		`); err != nil {
+			retErr = fmt.Errorf("failed to migrate data from snapshots: %w", err)
+			return retErr
+		}
+	}
+
+	if _, err := tx.Exec("DROP TABLE snapshots"); err != nil {
+		retErr = fmt.Errorf("failed to drop legacy snapshots table: %w", err)
+		return retErr
+	}
+
+	if err := tx.Commit(); err != nil {
+		retErr = fmt.Errorf("failed to commit migration: %w", err)
+		return retErr
+	}
+
+	db.logger.Info("Migrated legacy snapshots table to scrape_history")
+	return nil
+}
+
+// SaveSnapshot saves or updates a snapshot in the database.
+// If the URL exists with the same content_hash, only last_checked_at is updated.
+// If the content_hash differs, a new history row is created with change metadata.
 func (db *DB) SaveSnapshot(snapshot *Snapshot) error {
 	// Compute content hash if not provided
 	if snapshot.ContentHash == "" {
-		snapshot.ContentHash = computeContentHash(snapshot.CleanText)
+		source := snapshot.CleanText
+		if source == "" {
+			source = snapshot.RawContent
+		}
+		snapshot.ContentHash = computeContentHash(source)
 	}
 
 	// Extract domain if not provided
@@ -146,6 +207,12 @@ func (db *DB) SaveSnapshot(snapshot *Snapshot) error {
 		}
 	}
 
+	// Ensure we have something to persist into raw_content (NOT NULL)
+	rawContent := snapshot.RawContent
+	if rawContent == "" {
+		rawContent = snapshot.CleanText
+	}
+
 	// Check if we already have this exact content
 	existing, err := db.GetLatestSnapshot(snapshot.URL)
 	if err != nil && err != sql.ErrNoRows {
@@ -154,49 +221,64 @@ func (db *DB) SaveSnapshot(snapshot *Snapshot) error {
 
 	// If we have the same content, just update last_checked_at
 	if existing != nil && existing.ContentHash == snapshot.ContentHash {
-		query := `UPDATE snapshots SET last_checked_at = ? WHERE id = ?`
+		query := `UPDATE scrape_history SET last_checked_at = ? WHERE id = ?`
 		now := time.Now()
 		if _, err := db.conn.Exec(query, now, existing.ID); err != nil {
 			return fmt.Errorf("failed to update last_checked_at: %w", err)
 		}
+		snapshot.ID = existing.ID
+		snapshot.ScrapedAt = existing.ScrapedAt
+		snapshot.LastCheckedAt = now
+		snapshot.PreviousHash = existing.PreviousHash
+		snapshot.HasChanges = existing.HasChanges
+		snapshot.ChangeSummary = existing.ChangeSummary
 		db.logger.Info("Updated last_checked_at for URL: %s (content unchanged)", snapshot.URL)
 		return nil
-	}
-
-	// Content is new or changed - insert new snapshot
-	if snapshot.ID == "" {
-		snapshot.ID = uuid.New().String()
 	}
 
 	now := time.Now()
 	snapshot.ScrapedAt = now
 	snapshot.LastCheckedAt = now
 
+	previousHash := ""
+	if existing != nil {
+		previousHash = existing.ContentHash
+	}
+	hasChanges := previousHash != "" && previousHash != snapshot.ContentHash
+
 	query := `
-		INSERT INTO snapshots (
-			id, url, domain, content_hash, title, clean_text, raw_html, summary,
-			scraped_at, last_checked_at, status_code
-		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		INSERT INTO scrape_history (
+			url, domain, title, clean_text, raw_content, summary, content_hash,
+			previous_hash, has_changes, change_summary, status_code, scraped_at, last_checked_at
+		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 	`
 
-	_, err = db.conn.Exec(
+	result, err := db.conn.Exec(
 		query,
-		snapshot.ID,
 		snapshot.URL,
 		snapshot.Domain,
-		snapshot.ContentHash,
 		snapshot.Title,
 		snapshot.CleanText,
-		snapshot.RawHTML,
+		rawContent,
 		snapshot.Summary,
+		snapshot.ContentHash,
+		previousHash,
+		boolToInt(hasChanges),
+		snapshot.ChangeSummary,
+		snapshot.StatusCode,
 		snapshot.ScrapedAt,
 		snapshot.LastCheckedAt,
-		snapshot.StatusCode,
 	)
 
 	if err != nil {
 		return fmt.Errorf("failed to insert snapshot: %w", err)
 	}
+
+	if id, err := result.LastInsertId(); err == nil {
+		snapshot.ID = strconv.FormatInt(id, 10)
+	}
+	snapshot.PreviousHash = previousHash
+	snapshot.HasChanges = hasChanges
 
 	if existing != nil {
 		db.logger.Info("Saved new snapshot for URL: %s (content changed, hash: %s)", snapshot.URL, snapshot.ContentHash[:8])
@@ -210,9 +292,10 @@ func (db *DB) SaveSnapshot(snapshot *Snapshot) error {
 // GetLatestSnapshot retrieves the most recent snapshot for a given URL
 func (db *DB) GetLatestSnapshot(urlStr string) (*Snapshot, error) {
 	query := `
-		SELECT id, url, domain, content_hash, title, clean_text, raw_html, summary,
-		       scraped_at, last_checked_at, status_code
-		FROM snapshots
+		SELECT id, url, domain, title, clean_text, raw_content, summary,
+		       content_hash, previous_hash, has_changes, change_summary,
+		       status_code, scraped_at, last_checked_at
+		FROM scrape_history
 		WHERE url = ?
 		ORDER BY scraped_at DESC
 		LIMIT 1
@@ -220,18 +303,25 @@ func (db *DB) GetLatestSnapshot(urlStr string) (*Snapshot, error) {
 
 	var snapshot Snapshot
 	var summary sql.NullString
+	var previousHash sql.NullString
+	var changeSummary sql.NullString
+	var hasChangesInt int
+	var id int64
 	err := db.conn.QueryRow(query, urlStr).Scan(
-		&snapshot.ID,
+		&id,
 		&snapshot.URL,
 		&snapshot.Domain,
-		&snapshot.ContentHash,
 		&snapshot.Title,
 		&snapshot.CleanText,
-		&snapshot.RawHTML,
+		&snapshot.RawContent,
 		&summary,
+		&snapshot.ContentHash,
+		&previousHash,
+		&hasChangesInt,
+		&changeSummary,
+		&snapshot.StatusCode,
 		&snapshot.ScrapedAt,
 		&snapshot.LastCheckedAt,
-		&snapshot.StatusCode,
 	)
 
 	if err == sql.ErrNoRows {
@@ -245,6 +335,14 @@ func (db *DB) GetLatestSnapshot(urlStr string) (*Snapshot, error) {
 	if summary.Valid {
 		snapshot.Summary = summary.String
 	}
+	if previousHash.Valid {
+		snapshot.PreviousHash = previousHash.String
+	}
+	if changeSummary.Valid {
+		snapshot.ChangeSummary = changeSummary.String
+	}
+	snapshot.HasChanges = hasChangesInt != 0
+	snapshot.ID = strconv.FormatInt(id, 10)
 
 	return &snapshot, nil
 }
@@ -252,26 +350,34 @@ func (db *DB) GetLatestSnapshot(urlStr string) (*Snapshot, error) {
 // GetSnapshotByID retrieves a snapshot by its ID
 func (db *DB) GetSnapshotByID(id string) (*Snapshot, error) {
 	query := `
-		SELECT id, url, domain, content_hash, title, clean_text, raw_html, summary,
-		       scraped_at, last_checked_at, status_code
-		FROM snapshots
+		SELECT id, url, domain, title, clean_text, raw_content, summary,
+		       content_hash, previous_hash, has_changes, change_summary,
+		       status_code, scraped_at, last_checked_at
+		FROM scrape_history
 		WHERE id = ?
 	`
 
 	var snapshot Snapshot
 	var summary sql.NullString
+	var previousHash sql.NullString
+	var changeSummary sql.NullString
+	var hasChangesInt int
+	var numericID int64
 	err := db.conn.QueryRow(query, id).Scan(
-		&snapshot.ID,
+		&numericID,
 		&snapshot.URL,
 		&snapshot.Domain,
-		&snapshot.ContentHash,
 		&snapshot.Title,
 		&snapshot.CleanText,
-		&snapshot.RawHTML,
+		&snapshot.RawContent,
 		&summary,
+		&snapshot.ContentHash,
+		&previousHash,
+		&hasChangesInt,
+		&changeSummary,
+		&snapshot.StatusCode,
 		&snapshot.ScrapedAt,
 		&snapshot.LastCheckedAt,
-		&snapshot.StatusCode,
 	)
 
 	if err == sql.ErrNoRows {
@@ -285,6 +391,130 @@ func (db *DB) GetSnapshotByID(id string) (*Snapshot, error) {
 	if summary.Valid {
 		snapshot.Summary = summary.String
 	}
+	if previousHash.Valid {
+		snapshot.PreviousHash = previousHash.String
+	}
+	if changeSummary.Valid {
+		snapshot.ChangeSummary = changeSummary.String
+	}
+	snapshot.HasChanges = hasChangesInt != 0
+	snapshot.ID = strconv.FormatInt(numericID, 10)
+
+	return &snapshot, nil
+}
+
+// GetHistoryByURL returns all snapshots for a URL ordered by scraped_at DESC.
+func (db *DB) GetHistoryByURL(urlStr string) ([]*Snapshot, error) {
+	query := `
+		SELECT id, url, domain, title, clean_text, raw_content, summary,
+		       content_hash, previous_hash, has_changes, change_summary,
+		       status_code, scraped_at, last_checked_at
+		FROM scrape_history
+		WHERE url = ?
+		ORDER BY scraped_at DESC
+	`
+
+	rows, err := db.conn.Query(query, urlStr)
+	if err != nil {
+		return nil, fmt.Errorf("failed to query history: %w", err)
+	}
+	defer rows.Close()
+
+	var snapshots []*Snapshot
+	for rows.Next() {
+		var snapshot Snapshot
+		var summary sql.NullString
+		var previousHash sql.NullString
+		var changeSummary sql.NullString
+		var hasChangesInt int
+		var id int64
+		if err := rows.Scan(
+			&id,
+			&snapshot.URL,
+			&snapshot.Domain,
+			&snapshot.Title,
+			&snapshot.CleanText,
+			&snapshot.RawContent,
+			&summary,
+			&snapshot.ContentHash,
+			&previousHash,
+			&hasChangesInt,
+			&changeSummary,
+			&snapshot.StatusCode,
+			&snapshot.ScrapedAt,
+			&snapshot.LastCheckedAt,
+		); err != nil {
+			return nil, fmt.Errorf("failed to scan history row: %w", err)
+		}
+		if summary.Valid {
+			snapshot.Summary = summary.String
+		}
+		if previousHash.Valid {
+			snapshot.PreviousHash = previousHash.String
+		}
+		if changeSummary.Valid {
+			snapshot.ChangeSummary = changeSummary.String
+		}
+		snapshot.HasChanges = hasChangesInt != 0
+		snapshot.ID = strconv.FormatInt(id, 10)
+		snapshots = append(snapshots, &snapshot)
+	}
+
+	return snapshots, nil
+}
+
+// GetSnapshotByTimestamp returns the snapshot for a URL at an exact scraped_at timestamp.
+func (db *DB) GetSnapshotByTimestamp(urlStr string, ts time.Time) (*Snapshot, error) {
+	query := `
+		SELECT id, url, domain, title, clean_text, raw_content, summary,
+		       content_hash, previous_hash, has_changes, change_summary,
+		       status_code, scraped_at, last_checked_at
+		FROM scrape_history
+		WHERE url = ? AND scraped_at = ?
+		LIMIT 1
+	`
+
+	var snapshot Snapshot
+	var summary sql.NullString
+	var previousHash sql.NullString
+	var changeSummary sql.NullString
+	var hasChangesInt int
+	var id int64
+	err := db.conn.QueryRow(query, urlStr, ts).Scan(
+		&id,
+		&snapshot.URL,
+		&snapshot.Domain,
+		&snapshot.Title,
+		&snapshot.CleanText,
+		&snapshot.RawContent,
+		&summary,
+		&snapshot.ContentHash,
+		&previousHash,
+		&hasChangesInt,
+		&changeSummary,
+		&snapshot.StatusCode,
+		&snapshot.ScrapedAt,
+		&snapshot.LastCheckedAt,
+	)
+
+	if err == sql.ErrNoRows {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("failed to query snapshot by timestamp: %w", err)
+	}
+
+	if summary.Valid {
+		snapshot.Summary = summary.String
+	}
+	if previousHash.Valid {
+		snapshot.PreviousHash = previousHash.String
+	}
+	if changeSummary.Valid {
+		snapshot.ChangeSummary = changeSummary.String
+	}
+	snapshot.HasChanges = hasChangesInt != 0
+	snapshot.ID = strconv.FormatInt(id, 10)
 
 	return &snapshot, nil
 }
@@ -292,9 +522,10 @@ func (db *DB) GetSnapshotByID(id string) (*Snapshot, error) {
 // GetSnapshotsByDomain retrieves all snapshots for a given domain
 func (db *DB) GetSnapshotsByDomain(domain string, limit int) ([]*Snapshot, error) {
 	query := `
-		SELECT id, url, domain, content_hash, title, clean_text, raw_html, summary,
-		       scraped_at, last_checked_at, status_code
-		FROM snapshots
+		SELECT id, url, domain, title, clean_text, raw_content, summary,
+		       content_hash, previous_hash, has_changes, change_summary,
+		       status_code, scraped_at, last_checked_at
+		FROM scrape_history
 		WHERE domain = ?
 		ORDER BY scraped_at DESC
 		LIMIT ?
@@ -310,18 +541,25 @@ func (db *DB) GetSnapshotsByDomain(domain string, limit int) ([]*Snapshot, error
 	for rows.Next() {
 		var snapshot Snapshot
 		var summary sql.NullString
+		var previousHash sql.NullString
+		var changeSummary sql.NullString
+		var hasChangesInt int
+		var id int64
 		err := rows.Scan(
-			&snapshot.ID,
+			&id,
 			&snapshot.URL,
 			&snapshot.Domain,
-			&snapshot.ContentHash,
 			&snapshot.Title,
 			&snapshot.CleanText,
-			&snapshot.RawHTML,
+			&snapshot.RawContent,
 			&summary,
+			&snapshot.ContentHash,
+			&previousHash,
+			&hasChangesInt,
+			&changeSummary,
+			&snapshot.StatusCode,
 			&snapshot.ScrapedAt,
 			&snapshot.LastCheckedAt,
-			&snapshot.StatusCode,
 		)
 		if err != nil {
 			return nil, fmt.Errorf("failed to scan snapshot: %w", err)
@@ -329,6 +567,14 @@ func (db *DB) GetSnapshotsByDomain(domain string, limit int) ([]*Snapshot, error
 		if summary.Valid {
 			snapshot.Summary = summary.String
 		}
+		if previousHash.Valid {
+			snapshot.PreviousHash = previousHash.String
+		}
+		if changeSummary.Valid {
+			snapshot.ChangeSummary = changeSummary.String
+		}
+		snapshot.HasChanges = hasChangesInt != 0
+		snapshot.ID = strconv.FormatInt(id, 10)
 		snapshots = append(snapshots, &snapshot)
 	}
 
@@ -337,8 +583,8 @@ func (db *DB) GetSnapshotsByDomain(domain string, limit int) ([]*Snapshot, error
 
 // UpdateSnapshotSummary updates the summary field for a given snapshot
 func (db *DB) UpdateSnapshotSummary(snapshotID string, summary string) error {
-	query := `UPDATE snapshots SET summary = ? WHERE id = ?`
-	
+	query := `UPDATE scrape_history SET summary = ? WHERE id = ?`
+
 	result, err := db.conn.Exec(query, summary, snapshotID)
 	if err != nil {
 		return fmt.Errorf("failed to update snapshot summary: %w", err)
@@ -404,16 +650,17 @@ func (db *DB) GetRecentSnapshots(limit, offset int) ([]*Snapshot, int, error) {
 
 	// Get total count
 	var total int
-	err := db.conn.QueryRow("SELECT COUNT(*) FROM snapshots").Scan(&total)
+	err := db.conn.QueryRow("SELECT COUNT(*) FROM scrape_history").Scan(&total)
 	if err != nil {
 		return nil, 0, fmt.Errorf("failed to get total count: %w", err)
 	}
 
 	// Get paginated snapshots
 	query := `
-		SELECT id, url, domain, content_hash, title, clean_text, raw_html, summary,
-		       scraped_at, last_checked_at, status_code
-		FROM snapshots
+		SELECT id, url, domain, title, clean_text, raw_content, summary,
+		       content_hash, previous_hash, has_changes, change_summary,
+		       status_code, scraped_at, last_checked_at
+		FROM scrape_history
 		ORDER BY scraped_at DESC
 		LIMIT ? OFFSET ?
 	`
@@ -428,18 +675,25 @@ func (db *DB) GetRecentSnapshots(limit, offset int) ([]*Snapshot, int, error) {
 	for rows.Next() {
 		var snapshot Snapshot
 		var summary sql.NullString
+		var previousHash sql.NullString
+		var changeSummary sql.NullString
+		var hasChangesInt int
+		var id int64
 		err := rows.Scan(
-			&snapshot.ID,
+			&id,
 			&snapshot.URL,
 			&snapshot.Domain,
-			&snapshot.ContentHash,
 			&snapshot.Title,
 			&snapshot.CleanText,
-			&snapshot.RawHTML,
+			&snapshot.RawContent,
 			&summary,
+			&snapshot.ContentHash,
+			&previousHash,
+			&hasChangesInt,
+			&changeSummary,
+			&snapshot.StatusCode,
 			&snapshot.ScrapedAt,
 			&snapshot.LastCheckedAt,
-			&snapshot.StatusCode,
 		)
 		if err != nil {
 			return nil, 0, fmt.Errorf("failed to scan snapshot: %w", err)
@@ -447,6 +701,14 @@ func (db *DB) GetRecentSnapshots(limit, offset int) ([]*Snapshot, int, error) {
 		if summary.Valid {
 			snapshot.Summary = summary.String
 		}
+		if previousHash.Valid {
+			snapshot.PreviousHash = previousHash.String
+		}
+		if changeSummary.Valid {
+			snapshot.ChangeSummary = changeSummary.String
+		}
+		snapshot.HasChanges = hasChangesInt != 0
+		snapshot.ID = strconv.FormatInt(id, 10)
 		snapshots = append(snapshots, &snapshot)
 	}
 
@@ -463,7 +725,7 @@ func (db *DB) GetStats() (map[string]interface{}, error) {
 
 	// Total snapshots
 	var totalSnapshots int
-	err := db.conn.QueryRow("SELECT COUNT(*) FROM snapshots").Scan(&totalSnapshots)
+	err := db.conn.QueryRow("SELECT COUNT(*) FROM scrape_history").Scan(&totalSnapshots)
 	if err != nil {
 		return nil, fmt.Errorf("failed to get total snapshots: %w", err)
 	}
@@ -471,7 +733,7 @@ func (db *DB) GetStats() (map[string]interface{}, error) {
 
 	// Unique URLs
 	var uniqueURLs int
-	err = db.conn.QueryRow("SELECT COUNT(DISTINCT url) FROM snapshots").Scan(&uniqueURLs)
+	err = db.conn.QueryRow("SELECT COUNT(DISTINCT url) FROM scrape_history").Scan(&uniqueURLs)
 	if err != nil {
 		return nil, fmt.Errorf("failed to get unique URLs: %w", err)
 	}
@@ -479,7 +741,7 @@ func (db *DB) GetStats() (map[string]interface{}, error) {
 
 	// Unique domains
 	var uniqueDomains int
-	err = db.conn.QueryRow("SELECT COUNT(DISTINCT domain) FROM snapshots").Scan(&uniqueDomains)
+	err = db.conn.QueryRow("SELECT COUNT(DISTINCT domain) FROM scrape_history").Scan(&uniqueDomains)
 	if err != nil {
 		return nil, fmt.Errorf("failed to get unique domains: %w", err)
 	}
@@ -498,3 +760,9 @@ func (db *DB) GetStats() (map[string]interface{}, error) {
 	return stats, nil
 }
 
+func boolToInt(v bool) int {
+	if v {
+		return 1
+	}
+	return 0
+}

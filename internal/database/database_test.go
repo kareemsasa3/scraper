@@ -51,13 +51,13 @@ func TestInitialize(t *testing.T) {
 
 	// Verify tables exist
 	var tableName string
-	err := db.conn.QueryRow("SELECT name FROM sqlite_master WHERE type='table' AND name='snapshots'").Scan(&tableName)
+	err := db.conn.QueryRow("SELECT name FROM sqlite_master WHERE type='table' AND name='scrape_history'").Scan(&tableName)
 	if err != nil {
-		t.Fatalf("Failed to find snapshots table: %v", err)
+		t.Fatalf("Failed to find scrape_history table: %v", err)
 	}
 
-	if tableName != "snapshots" {
-		t.Errorf("Expected table name 'snapshots', got '%s'", tableName)
+	if tableName != "scrape_history" {
+		t.Errorf("Expected table name 'scrape_history', got '%s'", tableName)
 	}
 }
 
@@ -347,3 +347,82 @@ func TestGetStats(t *testing.T) {
 	}
 }
 
+func TestGetHistoryByURL(t *testing.T) {
+	db, cleanup := setupTestDB(t)
+	defer cleanup()
+
+	// Save multiple snapshots for the same URL at different times
+	first := &Snapshot{
+		URL:        "https://history.example.com",
+		Title:      "First",
+		CleanText:  "v1",
+		StatusCode: 200,
+	}
+	if err := db.SaveSnapshot(first); err != nil {
+		t.Fatalf("Failed to save first snapshot: %v", err)
+	}
+
+	time.Sleep(5 * time.Millisecond)
+
+	second := &Snapshot{
+		URL:        "https://history.example.com",
+		Title:      "Second",
+		CleanText:  "v2",
+		StatusCode: 200,
+	}
+	if err := db.SaveSnapshot(second); err != nil {
+		t.Fatalf("Failed to save second snapshot: %v", err)
+	}
+
+	history, err := db.GetHistoryByURL("https://history.example.com")
+	if err != nil {
+		t.Fatalf("Failed to get history: %v", err)
+	}
+
+	if len(history) != 2 {
+		t.Fatalf("Expected 2 history entries, got %d", len(history))
+	}
+
+	// Should be ordered DESC by scraped_at (second first)
+	if history[0].ContentHash != second.ContentHash {
+		t.Errorf("Expected latest entry first")
+	}
+	if history[1].ContentHash != first.ContentHash {
+		t.Errorf("Expected oldest entry last")
+	}
+}
+
+func TestGetSnapshotByTimestamp(t *testing.T) {
+	db, cleanup := setupTestDB(t)
+	defer cleanup()
+
+	snap := &Snapshot{
+		URL:        "https://timestamp.example.com",
+		Title:      "Timestamped",
+		CleanText:  "original",
+		StatusCode: 200,
+	}
+	if err := db.SaveSnapshot(snap); err != nil {
+		t.Fatalf("Failed to save snapshot: %v", err)
+	}
+
+	found, err := db.GetSnapshotByTimestamp(snap.URL, snap.ScrapedAt)
+	if err != nil {
+		t.Fatalf("Failed to get snapshot by timestamp: %v", err)
+	}
+	if found == nil {
+		t.Fatal("Expected snapshot to be found")
+	}
+	if found.ContentHash != snap.ContentHash {
+		t.Errorf("Expected matching content hash")
+	}
+
+	// Query with a timestamp that does not exist
+	absent, err := db.GetSnapshotByTimestamp(snap.URL, snap.ScrapedAt.Add(5*time.Second))
+	if err != nil {
+		t.Fatalf("Unexpected error for missing timestamp: %v", err)
+	}
+	if absent != nil {
+		t.Errorf("Expected nil for missing timestamp")
+	}
+}
