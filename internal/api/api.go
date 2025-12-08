@@ -692,6 +692,11 @@ func (h *APIHandler) HandleMemorySearch(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 
+	if !h.database.HasFTS5() {
+		http.Error(w, database.ErrFTS5NotAvailable.Error(), http.StatusNotImplemented)
+		return
+	}
+
 	q := strings.TrimSpace(r.URL.Query().Get("q"))
 	if q == "" {
 		http.Error(w, "q query parameter is required", http.StatusBadRequest)

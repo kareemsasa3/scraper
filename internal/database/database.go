@@ -4,6 +4,7 @@ import (
 	"crypto/sha256"
 	"database/sql"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"net/url"
 	"strconv"
@@ -21,10 +22,14 @@ type Logger interface {
 	Error(format string, v ...interface{})
 }
 
+// ErrFTS5NotAvailable is returned when SQLite was built without FTS5 support.
+var ErrFTS5NotAvailable = errors.New("fts5 extension not available; rebuild with `-tags sqlite_fts5`")
+
 // DB wraps the SQLite database connection
 type DB struct {
-	conn   *sql.DB
-	logger Logger
+	conn         *sql.DB
+	logger       Logger
+	ftsAvailable bool
 }
 
 // Snapshot represents a scrape history entry in the database.
@@ -105,7 +110,14 @@ func (db *DB) migrate() error {
 	}
 
 	if err := db.createFTS5Index(); err != nil {
-		return err
+		if errors.Is(err, ErrFTS5NotAvailable) {
+			db.logger.Warn("FTS5 extension unavailable; full-text search disabled: %v", err)
+			db.ftsAvailable = false
+		} else {
+			return err
+		}
+	} else {
+		db.ftsAvailable = true
 	}
 
 	return nil
@@ -354,7 +366,7 @@ func (db *DB) createFTS5Index() error {
 
 	if _, err := db.conn.Exec(createTable); err != nil {
 		if strings.Contains(err.Error(), "no such module: fts5") {
-			return fmt.Errorf("fts5 extension not available; rebuild with `-tags sqlite_fts5`: %w", err)
+			return fmt.Errorf("%w: %v", ErrFTS5NotAvailable, err)
 		}
 		return fmt.Errorf("failed to create FTS5 virtual table: %w", err)
 	}
@@ -398,10 +410,22 @@ func (db *DB) createFTS5Index() error {
 
 // RebuildFTS5 drops and recreates the FTS5 index from scratch.
 func (db *DB) RebuildFTS5() error {
+	if !db.ftsAvailable {
+		return ErrFTS5NotAvailable
+	}
+
 	if _, err := db.conn.Exec(`DROP TABLE IF EXISTS scrape_search;`); err != nil {
 		return fmt.Errorf("failed to drop FTS5 table: %w", err)
 	}
-	return db.createFTS5Index()
+	if err := db.createFTS5Index(); err != nil {
+		if errors.Is(err, ErrFTS5NotAvailable) {
+			db.ftsAvailable = false
+		}
+		return err
+	}
+
+	db.ftsAvailable = true
+	return nil
 }
 
 // migrateSnapshotsToHistory copies data from the legacy snapshots table (if present)
@@ -1161,6 +1185,10 @@ func (db *DB) GetRecentSnapshots(limit, offset int) ([]*Snapshot, int, error) {
 
 // SearchContent performs full-text search across stored snapshots.
 func (db *DB) SearchContent(query string, domainFilter string, limit int, offset int) ([]SearchResult, error) {
+	if !db.ftsAvailable {
+		return nil, ErrFTS5NotAvailable
+	}
+
 	if limit <= 0 {
 		limit = 20
 	}
@@ -1225,6 +1253,11 @@ func (db *DB) SearchContent(query string, domainFilter string, limit int, offset
 	}
 
 	return results, nil
+}
+
+// HasFTS5 reports whether the database was initialized with FTS5 support.
+func (db *DB) HasFTS5() bool {
+	return db != nil && db.ftsAvailable
 }
 
 // GetStats returns database statistics

@@ -3,6 +3,8 @@ package api
 import (
 	"encoding/json"
 	"net/http"
+
+	"github.com/kareemsasa3/arachne/internal/database"
 )
 
 // HandleRebuildFTS5 forces a rebuild of the FTS5 search index.
@@ -14,6 +16,11 @@ func (h *APIHandler) HandleRebuildFTS5(w http.ResponseWriter, r *http.Request) {
 
 	if h.database == nil {
 		http.Error(w, "Memory database not available", http.StatusServiceUnavailable)
+		return
+	}
+
+	if !h.database.HasFTS5() {
+		http.Error(w, database.ErrFTS5NotAvailable.Error(), http.StatusNotImplemented)
 		return
 	}
 
@@ -49,6 +56,11 @@ func (h *APIHandler) HandleRebuildFTS5(w http.ResponseWriter, r *http.Request) {
 func (h *APIHandler) HandleTestFTS5(w http.ResponseWriter, r *http.Request) {
 	if h.database == nil {
 		http.Error(w, "Memory database not available", http.StatusServiceUnavailable)
+		return
+	}
+
+	if !h.database.HasFTS5() {
+		http.Error(w, database.ErrFTS5NotAvailable.Error(), http.StatusNotImplemented)
 		return
 	}
 
