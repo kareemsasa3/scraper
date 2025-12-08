@@ -603,6 +603,47 @@ func (db *DB) UpdateSnapshotSummary(snapshotID string, summary string) error {
 	return nil
 }
 
+// UpdateChangeSummary updates the change_summary field for a given snapshot
+func (db *DB) UpdateChangeSummary(snapshotID string, summary string) error {
+	query := `UPDATE scrape_history SET change_summary = ?, has_changes = 1 WHERE id = ?`
+
+	result, err := db.conn.Exec(query, summary, snapshotID)
+	if err != nil {
+		return fmt.Errorf("failed to update change summary: %w", err)
+	}
+
+	rowsAffected, err := result.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("failed to get rows affected: %w", err)
+	}
+
+	if rowsAffected == 0 {
+		return fmt.Errorf("snapshot not found: %s", snapshotID)
+	}
+
+	db.logger.Info("Updated change summary for snapshot %s", snapshotID)
+	return nil
+}
+
+// DeleteSnapshot deletes a snapshot/version by ID
+func (db *DB) DeleteSnapshot(snapshotID string) error {
+	result, err := db.conn.Exec(`DELETE FROM scrape_history WHERE id = ?`, snapshotID)
+	if err != nil {
+		return fmt.Errorf("failed to delete snapshot: %w", err)
+	}
+
+	rows, err := result.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("failed to get rows affected: %w", err)
+	}
+	if rows == 0 {
+		return fmt.Errorf("snapshot not found: %s", snapshotID)
+	}
+
+	db.logger.Info("Deleted snapshot %s", snapshotID)
+	return nil
+}
+
 // Close closes the database connection
 func (db *DB) Close() error {
 	if db.conn != nil {
