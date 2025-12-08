@@ -426,3 +426,31 @@ func TestGetSnapshotByTimestamp(t *testing.T) {
 		t.Errorf("Expected nil for missing timestamp")
 	}
 }
+
+func TestDeleteSnapshot(t *testing.T) {
+	db, cleanup := setupTestDB(t)
+	defer cleanup()
+
+	snap := &Snapshot{
+		URL:        "https://delete.example.com",
+		Title:      "Delete me",
+		CleanText:  "content",
+		StatusCode: 200,
+	}
+	if err := db.SaveSnapshot(snap); err != nil {
+		t.Fatalf("Failed to save snapshot: %v", err)
+	}
+
+	if err := db.DeleteSnapshot(snap.ID); err != nil {
+		t.Fatalf("Failed to delete snapshot: %v", err)
+	}
+
+	// Ensure it is gone
+	found, err := db.GetSnapshotByID(snap.ID)
+	if err != nil {
+		t.Fatalf("Error fetching deleted snapshot: %v", err)
+	}
+	if found != nil {
+		t.Fatalf("Expected snapshot to be deleted")
+	}
+}

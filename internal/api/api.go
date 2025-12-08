@@ -1,11 +1,14 @@
 package api
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"net/url"
+	"os"
 	"strconv"
 	"strings"
 	"sync"
@@ -603,11 +606,6 @@ func (h *APIHandler) HandleScrapeVersion(w http.ResponseWriter, r *http.Request)
 		}
 	}
 
-	if r.Method != http.MethodGet {
-		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
-		return
-	}
-
 	if h.database == nil {
 		http.Error(w, "Memory database not available", http.StatusServiceUnavailable)
 		return
@@ -624,21 +622,41 @@ func (h *APIHandler) HandleScrapeVersion(w http.ResponseWriter, r *http.Request)
 		return
 	}
 
-	snap, err := h.database.GetSnapshotByID(id)
-	if err != nil {
-		http.Error(w, fmt.Sprintf("Database error: %v", err), http.StatusInternalServerError)
-		return
-	}
-	if snap == nil {
-		http.Error(w, "Version not found", http.StatusNotFound)
-		return
-	}
+	switch r.Method {
+	case http.MethodGet:
+		snap, err := h.database.GetSnapshotByID(id)
+		if err != nil {
+			http.Error(w, fmt.Sprintf("Database error: %v", err), http.StatusInternalServerError)
+			return
+		}
+		if snap == nil {
+			http.Error(w, "Version not found", http.StatusNotFound)
+			return
+		}
 
-	resp := mapSnapshotToVersionResponse(snap)
-	w.Header().Set("Content-Type", "application/json")
-	if err := json.NewEncoder(w).Encode(resp); err != nil {
-		http.Error(w, "Failed to encode response", http.StatusInternalServerError)
-		return
+		resp := mapSnapshotToVersionResponse(snap)
+		w.Header().Set("Content-Type", "application/json")
+		if err := json.NewEncoder(w).Encode(resp); err != nil {
+			http.Error(w, "Failed to encode response", http.StatusInternalServerError)
+			return
+		}
+	case http.MethodDelete:
+		if err := h.database.DeleteSnapshot(id); err != nil {
+			if strings.Contains(err.Error(), "not found") {
+				http.Error(w, fmt.Sprintf("Snapshot not found: %s", id), http.StatusNotFound)
+			} else {
+				http.Error(w, fmt.Sprintf("Failed to delete snapshot: %v", err), http.StatusInternalServerError)
+			}
+			return
+		}
+		resp := DeleteResponse{
+			Success: true,
+			Message: "Deleted",
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(resp)
+	default:
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
 	}
 }
 
@@ -745,6 +763,19 @@ type UpdateSummaryResponse struct {
 	UpdatedAt  time.Time `json:"updated_at"`
 }
 
+// AnalyzeChangesRequest represents the request to analyze changes via AI
+type AnalyzeChangesRequest struct {
+	URL           string `json:"url"`
+	FromTimestamp string `json:"from_timestamp"`
+	ToTimestamp   string `json:"to_timestamp"`
+}
+
+// DeleteResponse represents a generic delete result
+type DeleteResponse struct {
+	Success bool   `json:"success"`
+	Message string `json:"message,omitempty"`
+}
+
 // HandleUpdateSnapshotSummary handles requests to update a snapshot's AI-generated summary
 func (h *APIHandler) HandleUpdateSnapshotSummary(w http.ResponseWriter, r *http.Request) {
 	// Simple bearer token auth if configured
@@ -814,6 +845,203 @@ func (h *APIHandler) HandleUpdateSnapshotSummary(w http.ResponseWriter, r *http.
 	}
 }
 
+// HandleAnalyzeChanges proxies AI change analysis and persists the result.
+func (h *APIHandler) HandleAnalyzeChanges(w http.ResponseWriter, r *http.Request) {
+	if h.config.APIToken != "" {
+		auth := r.Header.Get("Authorization")
+		const prefix = "Bearer "
+		if len(auth) <= len(prefix) || auth[:len(prefix)] != prefix || auth[len(prefix):] != h.config.APIToken {
+			http.Error(w, "Unauthorized", http.StatusUnauthorized)
+			return
+		}
+	}
+
+	if r.Method != http.MethodPost {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	if h.database == nil {
+		http.Error(w, "Memory database not available", http.StatusServiceUnavailable)
+		return
+	}
+
+	var reqBody AnalyzeChangesRequest
+	if err := json.NewDecoder(r.Body).Decode(&reqBody); err != nil {
+		http.Error(w, "Invalid request body", http.StatusBadRequest)
+		return
+	}
+
+	if reqBody.URL == "" || reqBody.FromTimestamp == "" || reqBody.ToTimestamp == "" {
+		http.Error(w, "url, from_timestamp, and to_timestamp are required", http.StatusBadRequest)
+		return
+	}
+
+	fromTime, err := time.Parse(time.RFC3339, reqBody.FromTimestamp)
+	if err != nil {
+		http.Error(w, "invalid from_timestamp, must be RFC3339", http.StatusBadRequest)
+		return
+	}
+	toTime, err := time.Parse(time.RFC3339, reqBody.ToTimestamp)
+	if err != nil {
+		http.Error(w, "invalid to_timestamp, must be RFC3339", http.StatusBadRequest)
+		return
+	}
+
+	oldSnap, err := h.database.GetSnapshotByTimestamp(reqBody.URL, fromTime)
+	if err != nil {
+		http.Error(w, fmt.Sprintf("Database error: %v", err), http.StatusInternalServerError)
+		return
+	}
+	if oldSnap == nil {
+		http.Error(w, "from version not found", http.StatusNotFound)
+		return
+	}
+
+	newSnap, err := h.database.GetSnapshotByTimestamp(reqBody.URL, toTime)
+	if err != nil {
+		http.Error(w, fmt.Sprintf("Database error: %v", err), http.StatusInternalServerError)
+		return
+	}
+	if newSnap == nil {
+		http.Error(w, "to version not found", http.StatusNotFound)
+		return
+	}
+
+	diffText, _, _ := buildUnifiedDiff(contentForDiff(oldSnap), contentForDiff(newSnap))
+
+	backendURL := os.Getenv("AI_BACKEND_URL")
+	if backendURL == "" {
+		backendURL = "http://ai-backend:3001/analyze-changes"
+	}
+	payload := map[string]string{
+		"diff":          diffText,
+		"old_url":       oldSnap.URL,
+		"new_url":       newSnap.URL,
+		"old_timestamp": oldSnap.ScrapedAt.Format(time.RFC3339),
+		"new_timestamp": newSnap.ScrapedAt.Format(time.RFC3339),
+	}
+
+	body, err := json.Marshal(payload)
+	if err != nil {
+		http.Error(w, "Failed to encode request", http.StatusInternalServerError)
+		return
+	}
+
+	req, err := http.NewRequest(http.MethodPost, backendURL, bytes.NewReader(body))
+	if err != nil {
+		http.Error(w, fmt.Sprintf("Failed to create backend request: %v", err), http.StatusInternalServerError)
+		return
+	}
+	req.Header.Set("Content-Type", "application/json")
+
+	client := &http.Client{
+		Timeout: 0, // streaming
+	}
+
+	resp, err := client.Do(req)
+	if err != nil {
+		http.Error(w, fmt.Sprintf("AI backend error: %v", err), http.StatusBadGateway)
+		return
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		msg, _ := io.ReadAll(resp.Body)
+		http.Error(w, fmt.Sprintf("AI backend returned %d: %s", resp.StatusCode, string(msg)), http.StatusBadGateway)
+		return
+	}
+
+	flusher, ok := w.(http.Flusher)
+	if !ok {
+		http.Error(w, "Streaming not supported", http.StatusInternalServerError)
+		return
+	}
+
+	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+	w.Header().Set("Cache-Control", "no-cache")
+	w.Header().Set("Transfer-Encoding", "chunked")
+
+	var buf bytes.Buffer
+	tmp := make([]byte, 2048)
+	for {
+		n, readErr := resp.Body.Read(tmp)
+		if n > 0 {
+			chunk := tmp[:n]
+			buf.Write(chunk)
+			if _, err := w.Write(chunk); err != nil {
+				return
+			}
+			flusher.Flush()
+		}
+		if readErr != nil {
+			if readErr == io.EOF {
+				break
+			}
+			http.Error(w, fmt.Sprintf("Stream error: %v", readErr), http.StatusBadGateway)
+			return
+		}
+	}
+
+	// Persist analysis as change_summary on the newer snapshot
+	summary := strings.TrimSpace(buf.String())
+	if summary != "" {
+		if err := h.database.UpdateChangeSummary(newSnap.ID, summary); err != nil {
+			// log but don't fail the response
+			fmt.Printf("Warning: failed to persist change summary: %v\n", err)
+		}
+	}
+}
+
+// HandleDeleteSnapshot deletes a specific version by ID.
+func (h *APIHandler) HandleDeleteSnapshot(w http.ResponseWriter, r *http.Request) {
+	if h.config.APIToken != "" {
+		auth := r.Header.Get("Authorization")
+		const prefix = "Bearer "
+		if len(auth) <= len(prefix) || auth[:len(prefix)] != prefix || auth[len(prefix):] != h.config.APIToken {
+			http.Error(w, "Unauthorized", http.StatusUnauthorized)
+			return
+		}
+	}
+
+	if r.Method != http.MethodDelete {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	if h.database == nil {
+		http.Error(w, "Memory database not available", http.StatusServiceUnavailable)
+		return
+	}
+
+	parts := strings.Split(strings.TrimSuffix(r.URL.Path, "/"), "/")
+	if len(parts) < 5 {
+		http.Error(w, "Invalid URL path", http.StatusBadRequest)
+		return
+	}
+	id := parts[len(parts)-1]
+	if id == "" {
+		http.Error(w, "Missing version ID", http.StatusBadRequest)
+		return
+	}
+
+	if err := h.database.DeleteSnapshot(id); err != nil {
+		if strings.Contains(err.Error(), "not found") {
+			http.Error(w, fmt.Sprintf("Snapshot not found: %s", id), http.StatusNotFound)
+		} else {
+			http.Error(w, fmt.Sprintf("Failed to delete snapshot: %v", err), http.StatusInternalServerError)
+		}
+		return
+	}
+
+	resp := DeleteResponse{
+		Success: true,
+		Message: "Deleted",
+	}
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(resp)
+}
+
 func mapSnapshotToHistoryResponse(snapshot *database.Snapshot) HistoryEntryResponse {
 	return HistoryEntryResponse{
 		ID:            snapshot.ID,
@@ -863,23 +1091,20 @@ func contentForDiff(snapshot *database.Snapshot) string {
 // buildUnifiedDiff returns a unified diff string plus added/removed line counts.
 func buildUnifiedDiff(oldText, newText string) (string, int, int) {
 	dmp := diffmatchpatch.New()
-	text1, text2, lines := dmp.DiffLinesToChars(oldText, newText)
-	diffs := dmp.DiffMain(text1, text2, false)
-	diffs = dmp.DiffCharsToLines(diffs, lines)
+	diffs := dmp.DiffMain(oldText, newText, false)
 
 	added := 0
 	removed := 0
 	for _, d := range diffs {
 		switch d.Type {
 		case diffmatchpatch.DiffInsert:
-			added += countLines(d.Text)
+			added += strings.Count(d.Text, "\n")
 		case diffmatchpatch.DiffDelete:
-			removed += countLines(d.Text)
+			removed += strings.Count(d.Text, "\n")
 		}
 	}
 
-	patches := dmp.PatchMake(oldText, newText)
-	diffText := dmp.PatchToText(patches)
+	diffText := dmp.DiffPrettyText(diffs)
 
 	return diffText, added, removed
 }
@@ -957,6 +1182,7 @@ func StartAPIServer(scraper ScraperInterface, cfg *config.Config, port int, dbPa
 	http.HandleFunc("/api/scrapes/history", corsMiddleware(handler.HandleScrapeHistory))
 	http.HandleFunc("/api/scrapes/version/", corsMiddleware(handler.HandleScrapeVersion))
 	http.HandleFunc("/api/scrapes/diff", corsMiddleware(handler.HandleScrapeDiff))
+	http.HandleFunc("/api/scrapes/analyze-changes", corsMiddleware(handler.HandleAnalyzeChanges))
 
 	// Prometheus metrics endpoint (wrapped with CORS handler)
 	http.Handle("/prometheus", corsMiddleware(func(w http.ResponseWriter, r *http.Request) {
@@ -976,7 +1202,9 @@ func StartAPIServer(scraper ScraperInterface, cfg *config.Config, port int, dbPa
 	fmt.Printf("   PATCH /memory/snapshot/:id/summary - Update snapshot summary\n")
 	fmt.Printf("   GET   /api/scrapes/history?url=<url> - Get version history for URL\n")
 	fmt.Printf("   GET   /api/scrapes/version/:id - Get a specific version by ID\n")
+	fmt.Printf("   DELETE /api/scrapes/version/:id - Delete a specific version\n")
 	fmt.Printf("   GET   /api/scrapes/diff?url=<url>&from=<ts>&to=<ts> - Diff two versions\n")
+	fmt.Printf("   POST  /api/scrapes/analyze-changes - AI change analysis\n")
 	fmt.Printf("   GET   /prometheus - Prometheus metrics\n")
 
 	return http.ListenAndServe(addr, nil)
