@@ -14,6 +14,14 @@ type ScrapedData struct {
 	Content string    `json:"content,omitempty"` // Full HTML/JSON content
 }
 
+// ProgressStats captures scrape progress as discovered vs. completed counts.
+// Discovered should reflect the total known pages/URLs (queued + completed).
+// Completed is the number of pages that finished scraping (success or error).
+type ProgressStats struct {
+	Completed  int `json:"completed"`
+	Discovered int `json:"discovered"`
+}
+
 // PaginationConfig defines flexible pagination extraction rules
 type PaginationConfig struct {
 	// Selectors is an ordered list of CSS selectors to try for finding the next page link

@@ -65,7 +65,9 @@ func (s *HeadlessStrategy) Execute(ctx context.Context, urlStr string, cfg *conf
 		// Use the unique temporary profile directory for this scrape
 		chromedp.Flag("user-data-dir", profileDir),
 		// --- Best Practice Flags for a Clean Run ---
-		chromedp.Flag("headless", "new"),            // Use new headless mode (Chrome 112+)
+		chromedp.Flag("headless", "new"),                                // Use new headless mode (Chrome 112+)
+		chromedp.Flag("disable-blink-features", "AutomationControlled"), // Minimal stealth
+		chromedp.Flag("window-size", "1920,1080"),                       // Realistic desktop viewport
 		chromedp.Flag("disable-gpu", true),
 		chromedp.Flag("disable-extensions", true),
 		chromedp.Flag("no-first-run", true),
@@ -95,12 +97,12 @@ func (s *HeadlessStrategy) Execute(ctx context.Context, urlStr string, cfg *conf
 	// Always add container-friendly flags when using Chromium (common in Docker)
 	if foundContainerChrome {
 		opts = append(opts,
-			chromedp.Flag("disable-dev-shm-usage", true),        // Use /tmp instead of /dev/shm
-			chromedp.Flag("disable-software-rasterizer", true),  // Disable software GPU
-			chromedp.Flag("disable-gpu-sandbox", true),          // Disable GPU sandbox
-			chromedp.Flag("disable-gl-drawing-for-tests", true), // Disable GL drawing
-			chromedp.Flag("use-gl", "angle"),                    // Use ANGLE for GL
-			chromedp.Flag("use-angle", "swiftshader"),           // Use SwiftShader (software)
+			chromedp.Flag("disable-dev-shm-usage", true),              // Use /tmp instead of /dev/shm
+			chromedp.Flag("disable-software-rasterizer", true),        // Disable software GPU
+			chromedp.Flag("disable-gpu-sandbox", true),                // Disable GPU sandbox
+			chromedp.Flag("disable-gl-drawing-for-tests", true),       // Disable GL drawing
+			chromedp.Flag("use-gl", "angle"),                          // Use ANGLE for GL
+			chromedp.Flag("use-angle", "swiftshader"),                 // Use SwiftShader (software)
 			chromedp.Flag("disable-features", "VizDisplayCompositor"), // Disable Viz
 		)
 		debugLog(urlStr, "  Added container-friendly flags (GPU disabled)")
@@ -178,6 +180,16 @@ func (s *HeadlessStrategy) Execute(ctx context.Context, urlStr string, cfg *conf
 		return nil
 	})); err != nil {
 		debugLog(urlStr, "✗ Chrome startup FAILED: %v | ctxErr=%v | elapsed=%v", err, chromeCtx.Err(), time.Since(startTime))
+		// Attempt a quick screenshot for debugging what Chrome is showing
+		screenshotPath := fmt.Sprintf("/tmp/chrome-debug-%d.png", time.Now().Unix())
+		var buf []byte
+		if shotErr := chromedp.Run(chromeCtx, chromedp.CaptureScreenshot(&buf)); shotErr == nil {
+			if saveErr := os.WriteFile(screenshotPath, buf, 0644); saveErr == nil {
+				debugLog(urlStr, "📸 Saved debug screenshot to: %s", screenshotPath)
+			}
+		} else {
+			debugLog(urlStr, "⚠ Could not capture screenshot: %v", shotErr)
+		}
 		return nil, errors.NewScraperError(urlStr, "Chrome startup failed", err)
 	}
 	debugLog(urlStr, "  ✓ Step 0: Chrome started and ready | elapsed=%v", time.Since(startTime))
@@ -236,6 +248,16 @@ func (s *HeadlessStrategy) Execute(ctx context.Context, urlStr string, cfg *conf
 	})); err != nil {
 		debugLog(urlStr, "✗ Navigate FAILED: %v | ctxErr=%v | taskCtxErr=%v | parentCtxErr=%v | elapsed=%v",
 			err, chromeCtx.Err(), taskCtx.Err(), ctx.Err(), time.Since(startTime))
+		// Attempt a quick screenshot for debugging what Chrome is showing
+		screenshotPath := fmt.Sprintf("/tmp/chrome-debug-%d.png", time.Now().Unix())
+		var buf []byte
+		if shotErr := chromedp.Run(chromeCtx, chromedp.CaptureScreenshot(&buf)); shotErr == nil {
+			if saveErr := os.WriteFile(screenshotPath, buf, 0644); saveErr == nil {
+				debugLog(urlStr, "📸 Saved debug screenshot to: %s", screenshotPath)
+			}
+		} else {
+			debugLog(urlStr, "⚠ Could not capture screenshot: %v", shotErr)
+		}
 		return nil, errors.NewScraperError(urlStr, "Headless navigation failed", err)
 	}
 	debugLog(urlStr, "  ✓ Step 1: Navigate completed | elapsed=%v", time.Since(startTime))

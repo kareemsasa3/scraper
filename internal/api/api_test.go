@@ -48,21 +48,29 @@ func (m *MockScraper) ScrapeSiteWithConfig(siteURL string, paginationConfig *typ
 	}
 }
 
-func (m *MockScraper) ScrapeURLsStreaming(urls []string, callback func(types.ScrapedData)) []types.ScrapedData {
+func (m *MockScraper) ScrapeURLsStreaming(urls []string, callback func(*types.ScrapedData, *types.ProgressStats)) []types.ScrapedData {
 	results := m.ScrapeURLs(urls)
 	if callback != nil {
-		for _, result := range results {
-			callback(result)
+		for i := range results {
+			result := results[i]
+			callback(&result, &types.ProgressStats{
+				Completed:  i + 1,
+				Discovered: len(results),
+			})
 		}
 	}
 	return results
 }
 
-func (m *MockScraper) ScrapeSiteWithConfigStreaming(siteURL string, paginationConfig *types.PaginationConfig, callback func(types.ScrapedData)) []types.ScrapedData {
+func (m *MockScraper) ScrapeSiteWithConfigStreaming(siteURL string, paginationConfig *types.PaginationConfig, callback func(*types.ScrapedData, *types.ProgressStats)) []types.ScrapedData {
 	results := m.ScrapeSiteWithConfig(siteURL, paginationConfig)
 	if callback != nil {
-		for _, result := range results {
-			callback(result)
+		for i := range results {
+			result := results[i]
+			callback(&result, &types.ProgressStats{
+				Completed:  i + 1,
+				Discovered: len(results),
+			})
 		}
 	}
 	return results

@@ -3,6 +3,7 @@ package api
 import (
 	"bytes"
 	"context"
+	"database/sql"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -29,8 +30,8 @@ type ScraperInterface interface {
 	ScrapeURLs(urls []string) []types.ScrapedData
 	ScrapeSite(siteURL string) []types.ScrapedData
 	ScrapeSiteWithConfig(siteURL string, paginationConfig *types.PaginationConfig) []types.ScrapedData
-	ScrapeURLsStreaming(urls []string, callback func(types.ScrapedData)) []types.ScrapedData
-	ScrapeSiteWithConfigStreaming(siteURL string, paginationConfig *types.PaginationConfig, callback func(types.ScrapedData)) []types.ScrapedData
+	ScrapeURLsStreaming(urls []string, callback func(*types.ScrapedData, *types.ProgressStats)) []types.ScrapedData
+	ScrapeSiteWithConfigStreaming(siteURL string, paginationConfig *types.PaginationConfig, callback func(*types.ScrapedData, *types.ProgressStats)) []types.ScrapedData
 	GetMetrics() interface{}
 }
 
@@ -208,51 +209,78 @@ func (h *APIHandler) executeScrapingJob(job *storage.ScrapingJob) {
 		fmt.Printf("Failed to update job status to running: %v\n", err)
 	}
 
-	// Calculate total URLs for progress tracking
-	totalURLs := len(job.Request.URLs)
+	// Track totals for progress; adjust dynamically for site crawls.
+	totalKnown := len(job.Request.URLs)
 	if job.Request.SiteURL != "" {
-		// For pagination, we'll update progress based on pages scraped
-		totalURLs = 1 // Will be updated as we discover more pages
+		totalKnown = 1 // seed; will grow as we discover more pages
 	}
 
-	// Create a callback to update job with incremental results
 	var mu sync.Mutex
 	completedCount := 0
-	callback := func(data types.ScrapedData) {
+
+	callback := func(data *types.ScrapedData, stats *types.ProgressStats) {
 		mu.Lock()
 		defer mu.Unlock()
 
-		// Append new result
-		job.Results = append(job.Results, data)
-		completedCount++
+		// Update discovered/total if provided
+		if stats != nil && stats.Discovered > totalKnown {
+			totalKnown = stats.Discovered
+		}
 
-		// Save snapshot to database if scrape was successful
-		if h.database != nil && data.Error == "" && data.Status >= 200 && data.Status < 400 {
-			snapshot := &database.Snapshot{
-				URL:        data.URL,
-				Title:      data.Title,
-				CleanText:  data.Content, // Using Content field as clean text
-				StatusCode: data.Status,
-			}
-			if err := h.database.SaveSnapshot(snapshot); err != nil {
-				fmt.Printf("Warning: Failed to save snapshot for %s: %v\n", data.URL, err)
+		// Increment completed when we receive a result
+		if data != nil {
+			completedCount++
+		}
+
+		// Allow scraper to override completed count if it provides it
+		if stats != nil && stats.Completed > completedCount {
+			completedCount = stats.Completed
+		}
+
+		// Append new result when provided
+		if data != nil {
+			job.Results = append(job.Results, *data)
+
+			// Save snapshot to database if scrape was successful
+			if h.database != nil && data.Error == "" && data.Status >= 200 && data.Status < 400 {
+				snapshot := &database.Snapshot{
+					URL:        data.URL,
+					Title:      data.Title,
+					CleanText:  data.Content, // Using Content field as clean text
+					StatusCode: data.Status,
+				}
+				if err := h.database.SaveSnapshot(snapshot); err != nil {
+					fmt.Printf("Warning: Failed to save snapshot for %s: %v\n", data.URL, err)
+				}
+			} else if h.database != nil && data != nil && (data.Error != "" || data.Status >= 400 || data.Status == 0) {
+				// Capture failures to avoid losing recent error states
+				scrapeStatus := classifyFailureStatus(data.Status, data.Error)
+				domain := ""
+				if parsed, err := url.Parse(data.URL); err == nil {
+					domain = parsed.Host
+				}
+				if err := h.database.SaveFailedScrape(data.URL, domain, data.Status, data.Error, scrapeStatus); err != nil {
+					fmt.Printf("Warning: Failed to record failed scrape for %s: %v\n", data.URL, err)
+				}
 			}
 		}
 
-		// Update progress
-		if totalURLs > 0 {
-			job.Progress = (completedCount * 100) / totalURLs
-			if job.Progress > 95 {
-				job.Progress = 95 // Cap at 95% until fully complete
-			}
+		// Compute progress using current totals; reserve 100 for finalization
+		total := totalKnown
+		if total == 0 {
+			total = 1 // safety to avoid div by zero
+		}
+		job.Progress = (completedCount * 100) / total
+		if job.Progress > 99 && job.Status != "completed" {
+			job.Progress = 99
 		}
 
-		// Update job in storage with new result
+		// Persist incremental update
 		if err := h.storage.UpdateJob(ctx, job); err != nil {
 			fmt.Printf("Failed to update job with incremental result: %v\n", err)
 		} else {
-			fmt.Printf("Job %s: Added result %d/%d (Progress: %d%%)\n",
-				job.ID, completedCount, totalURLs, job.Progress)
+			fmt.Printf("Job %s: Progress %d/%d (%d%%)\n",
+				job.ID, completedCount, total, job.Progress)
 		}
 	}
 
@@ -334,6 +362,9 @@ type SnapshotResponse struct {
 	LastCheckedAt time.Time `json:"last_checked_at"`
 	AgeHours      float64   `json:"age_hours"`
 	StatusCode    int       `json:"status_code"`
+	ScrapeStatus  string    `json:"scrape_status"`
+	ErrorMessage  string    `json:"error_message,omitempty"`
+	RetryCount    int       `json:"retry_count,omitempty"`
 }
 
 // HistoryEntryResponse represents a single history entry for a URL.
@@ -350,6 +381,9 @@ type HistoryEntryResponse struct {
 	ScrapedAt     time.Time `json:"scraped_at"`
 	LastCheckedAt time.Time `json:"last_checked_at"`
 	StatusCode    int       `json:"status_code"`
+	ScrapeStatus  string    `json:"scrape_status"`
+	ErrorMessage  string    `json:"error_message,omitempty"`
+	RetryCount    int       `json:"retry_count,omitempty"`
 }
 
 // VersionResponse represents a full snapshot version.
@@ -368,6 +402,9 @@ type VersionResponse struct {
 	ScrapedAt     time.Time `json:"scraped_at"`
 	LastCheckedAt time.Time `json:"last_checked_at"`
 	StatusCode    int       `json:"status_code"`
+	ScrapeStatus  string    `json:"scrape_status"`
+	ErrorMessage  string    `json:"error_message,omitempty"`
+	RetryCount    int       `json:"retry_count,omitempty"`
 }
 
 // DiffResponse represents a diff between two versions.
@@ -434,7 +471,7 @@ func (h *APIHandler) HandleMemoryLookup(w http.ResponseWriter, r *http.Request) 
 	}
 
 	if snapshot != nil {
-		ageHours := time.Since(snapshot.ScrapedAt).Hours()
+		ageHours := time.Since(snapshot.LastCheckedAt).Hours()
 		response.Snapshot = &SnapshotResponse{
 			ID:            snapshot.ID,
 			URL:           snapshot.URL,
@@ -446,6 +483,9 @@ func (h *APIHandler) HandleMemoryLookup(w http.ResponseWriter, r *http.Request) 
 			LastCheckedAt: snapshot.LastCheckedAt,
 			AgeHours:      ageHours,
 			StatusCode:    snapshot.StatusCode,
+			ScrapeStatus:  snapshot.ScrapeStatus,
+			ErrorMessage:  snapshot.ErrorMessage,
+			RetryCount:    snapshot.RetryCount,
 		}
 	}
 
@@ -462,6 +502,16 @@ type MemoryRecentResponse struct {
 	Total     int                `json:"total"`
 	Limit     int                `json:"limit"`
 	Offset    int                `json:"offset"`
+}
+
+// MemorySearchResponse represents the response for full-text search.
+type MemorySearchResponse struct {
+	Query   string                  `json:"query"`
+	Domain  string                  `json:"domain,omitempty"`
+	Limit   int                     `json:"limit"`
+	Offset  int                     `json:"offset"`
+	Count   int                     `json:"count"`
+	Results []database.SearchResult `json:"results"`
 }
 
 // HandleMemoryRecent handles requests for recent snapshots with pagination
@@ -514,7 +564,7 @@ func (h *APIHandler) HandleMemoryRecent(w http.ResponseWriter, r *http.Request) 
 	// Convert to response format
 	snapshotResponses := make([]SnapshotResponse, 0, len(snapshots))
 	for _, snapshot := range snapshots {
-		ageHours := time.Since(snapshot.ScrapedAt).Hours()
+		ageHours := time.Since(snapshot.LastCheckedAt).Hours()
 		snapshotResponses = append(snapshotResponses, SnapshotResponse{
 			ID:            snapshot.ID,
 			URL:           snapshot.URL,
@@ -526,6 +576,9 @@ func (h *APIHandler) HandleMemoryRecent(w http.ResponseWriter, r *http.Request) 
 			LastCheckedAt: snapshot.LastCheckedAt,
 			AgeHours:      ageHours,
 			StatusCode:    snapshot.StatusCode,
+			ScrapeStatus:  snapshot.ScrapeStatus,
+			ErrorMessage:  snapshot.ErrorMessage,
+			RetryCount:    snapshot.RetryCount,
 		})
 	}
 
@@ -539,6 +592,145 @@ func (h *APIHandler) HandleMemoryRecent(w http.ResponseWriter, r *http.Request) 
 
 	w.Header().Set("Content-Type", "application/json")
 	if err := json.NewEncoder(w).Encode(response); err != nil {
+		http.Error(w, "Failed to encode response", http.StatusInternalServerError)
+		return
+	}
+}
+
+// HandleFailedScrapes returns recent failed scrape attempts.
+func (h *APIHandler) HandleFailedScrapes(w http.ResponseWriter, r *http.Request) {
+	if h.config.APIToken != "" {
+		auth := r.Header.Get("Authorization")
+		const prefix = "Bearer "
+		if len(auth) <= len(prefix) || auth[:len(prefix)] != prefix || auth[len(prefix):] != h.config.APIToken {
+			http.Error(w, "Unauthorized", http.StatusUnauthorized)
+			return
+		}
+	}
+
+	if r.Method != http.MethodGet {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	if h.database == nil {
+		http.Error(w, "Memory database not available", http.StatusServiceUnavailable)
+		return
+	}
+
+	limit, _ := strconv.Atoi(r.URL.Query().Get("limit"))
+	if limit <= 0 {
+		limit = 20
+	}
+	if limit > 200 {
+		limit = 200
+	}
+
+	rows, err := h.database.QueryRaw(`
+		SELECT url, domain, status_code, scrape_status, error_message, retry_count, scraped_at
+		FROM scrape_history
+		WHERE scrape_status != 'success'
+		ORDER BY scraped_at DESC
+		LIMIT ?
+	`, limit)
+	if err != nil {
+		http.Error(w, fmt.Sprintf("Database error: %v", err), http.StatusInternalServerError)
+		return
+	}
+	defer rows.Close()
+
+	var failures []map[string]interface{}
+	for rows.Next() {
+		var (
+			urlStr     string
+			domain     string
+			statusCode int
+			status     string
+			errMsg     sql.NullString
+			retryCount sql.NullInt64
+			scrapedAt  time.Time
+		)
+		if err := rows.Scan(&urlStr, &domain, &statusCode, &status, &errMsg, &retryCount, &scrapedAt); err != nil {
+			continue
+		}
+		failures = append(failures, map[string]interface{}{
+			"url":           urlStr,
+			"domain":        domain,
+			"status_code":   statusCode,
+			"scrape_status": status,
+			"error":         errMsg.String,
+			"retry_count":   int(retryCount.Int64),
+			"failed_at":     scrapedAt,
+		})
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(map[string]interface{}{
+		"failures": failures,
+		"count":    len(failures),
+	})
+}
+
+// HandleMemorySearch performs full-text search across stored snapshots.
+func (h *APIHandler) HandleMemorySearch(w http.ResponseWriter, r *http.Request) {
+	if h.config.APIToken != "" {
+		auth := r.Header.Get("Authorization")
+		const prefix = "Bearer "
+		if len(auth) <= len(prefix) || auth[:len(prefix)] != prefix || auth[len(prefix):] != h.config.APIToken {
+			http.Error(w, "Unauthorized", http.StatusUnauthorized)
+			return
+		}
+	}
+
+	if r.Method != http.MethodGet {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	if h.database == nil {
+		http.Error(w, "Memory database not available", http.StatusServiceUnavailable)
+		return
+	}
+
+	q := strings.TrimSpace(r.URL.Query().Get("q"))
+	if q == "" {
+		http.Error(w, "q query parameter is required", http.StatusBadRequest)
+		return
+	}
+
+	domain := strings.TrimSpace(r.URL.Query().Get("domain"))
+
+	limit := 20
+	if limitStr := r.URL.Query().Get("limit"); limitStr != "" {
+		if parsed, err := strconv.Atoi(limitStr); err == nil {
+			limit = parsed
+		}
+	}
+
+	offset := 0
+	if offsetStr := r.URL.Query().Get("offset"); offsetStr != "" {
+		if parsed, err := strconv.Atoi(offsetStr); err == nil {
+			offset = parsed
+		}
+	}
+
+	results, err := h.database.SearchContent(q, domain, limit, offset)
+	if err != nil {
+		http.Error(w, fmt.Sprintf("Database error: %v", err), http.StatusInternalServerError)
+		return
+	}
+
+	resp := MemorySearchResponse{
+		Query:   q,
+		Domain:  domain,
+		Limit:   limit,
+		Offset:  offset,
+		Count:   len(results),
+		Results: results,
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	if err := json.NewEncoder(w).Encode(resp); err != nil {
 		http.Error(w, "Failed to encode response", http.StatusInternalServerError)
 		return
 	}
@@ -611,13 +803,21 @@ func (h *APIHandler) HandleScrapeVersion(w http.ResponseWriter, r *http.Request)
 		return
 	}
 
-	parts := strings.Split(strings.TrimSuffix(r.URL.Path, "/"), "/")
-	if len(parts) < 5 {
+	path := strings.TrimSuffix(r.URL.Path, "/")
+
+	var id string
+	switch {
+	case strings.HasPrefix(path, "/memory/version/"):
+		id = strings.TrimPrefix(path, "/memory/version/")
+	case strings.HasPrefix(path, "/api/scrapes/version/"):
+		// Temporary compatibility for old route; prefer /memory/version/:id
+		id = strings.TrimPrefix(path, "/api/scrapes/version/")
+	default:
 		http.Error(w, "Invalid URL path", http.StatusBadRequest)
 		return
 	}
-	id := parts[len(parts)-1]
-	if id == "" {
+
+	if id == "" || strings.ContainsRune(id, '/') {
 		http.Error(w, "Missing version ID", http.StatusBadRequest)
 		return
 	}
@@ -1056,6 +1256,9 @@ func mapSnapshotToHistoryResponse(snapshot *database.Snapshot) HistoryEntryRespo
 		ScrapedAt:     snapshot.ScrapedAt,
 		LastCheckedAt: snapshot.LastCheckedAt,
 		StatusCode:    snapshot.StatusCode,
+		ScrapeStatus:  snapshot.ScrapeStatus,
+		ErrorMessage:  snapshot.ErrorMessage,
+		RetryCount:    snapshot.RetryCount,
 	}
 }
 
@@ -1075,6 +1278,9 @@ func mapSnapshotToVersionResponse(snapshot *database.Snapshot) VersionResponse {
 		ScrapedAt:     snapshot.ScrapedAt,
 		LastCheckedAt: snapshot.LastCheckedAt,
 		StatusCode:    snapshot.StatusCode,
+		ScrapeStatus:  snapshot.ScrapeStatus,
+		ErrorMessage:  snapshot.ErrorMessage,
+		RetryCount:    snapshot.RetryCount,
 	}
 }
 
@@ -1086,6 +1292,25 @@ func contentForDiff(snapshot *database.Snapshot) string {
 		return snapshot.RawContent
 	}
 	return snapshot.CleanText
+}
+
+func classifyFailureStatus(status int, msg string) string {
+	if status == http.StatusUnauthorized || status == http.StatusForbidden {
+		return "failed_blocked"
+	}
+	if status >= 400 && status < 600 {
+		return "failed_http"
+	}
+
+	lower := strings.ToLower(msg)
+	if strings.Contains(lower, "timeout") || strings.Contains(lower, "deadline") || strings.Contains(lower, "connection") {
+		return "failed_network"
+	}
+	if strings.Contains(lower, "captcha") || strings.Contains(lower, "blocked") {
+		return "failed_blocked"
+	}
+
+	return "failed_network"
 }
 
 // buildUnifiedDiff returns a unified diff string plus added/removed line counts.
@@ -1107,10 +1332,6 @@ func buildUnifiedDiff(oldText, newText string) (string, int, int) {
 	diffText := dmp.DiffPrettyText(diffs)
 
 	return diffText, added, removed
-}
-
-func countLines(text string) int {
-	return strings.Count(text, "\n")
 }
 
 // corsMiddleware wraps an HTTP handler with CORS headers
@@ -1178,7 +1399,17 @@ func StartAPIServer(scraper ScraperInterface, cfg *config.Config, port int, dbPa
 	http.HandleFunc("/metrics", corsMiddleware(handler.HandleMetrics))
 	http.HandleFunc("/memory/lookup", corsMiddleware(handler.HandleMemoryLookup))
 	http.HandleFunc("/memory/recent", corsMiddleware(handler.HandleMemoryRecent))
+	http.HandleFunc("/memory/search", corsMiddleware(handler.HandleMemorySearch))
+	http.HandleFunc("/memory/failures", corsMiddleware(handler.HandleFailedScrapes))
 	http.HandleFunc("/memory/snapshot/", corsMiddleware(handler.HandleUpdateSnapshotSummary)) // Handles /memory/snapshot/{id}/summary
+	http.HandleFunc("/memory/history", corsMiddleware(handler.HandleScrapeHistory))
+	http.HandleFunc("/memory/version/", corsMiddleware(handler.HandleScrapeVersion))
+	http.HandleFunc("/memory/diff", corsMiddleware(handler.HandleScrapeDiff))
+	http.HandleFunc("/memory/analyze-changes", corsMiddleware(handler.HandleAnalyzeChanges))
+	http.HandleFunc("/admin/rebuild-fts5", corsMiddleware(handler.HandleRebuildFTS5))
+	http.HandleFunc("/admin/test-fts5", corsMiddleware(handler.HandleTestFTS5))
+
+	// Temporary aliases for legacy /api/scrapes/* routes (to be removed once clients migrate)
 	http.HandleFunc("/api/scrapes/history", corsMiddleware(handler.HandleScrapeHistory))
 	http.HandleFunc("/api/scrapes/version/", corsMiddleware(handler.HandleScrapeVersion))
 	http.HandleFunc("/api/scrapes/diff", corsMiddleware(handler.HandleScrapeDiff))
@@ -1199,12 +1430,16 @@ func StartAPIServer(scraper ScraperInterface, cfg *config.Config, port int, dbPa
 	fmt.Printf("   GET   /metrics - Get metrics\n")
 	fmt.Printf("   GET   /memory/lookup?url=<url> - Check memory for URL\n")
 	fmt.Printf("   GET   /memory/recent?limit=N&offset=M - Get recent snapshots\n")
+	fmt.Printf("   GET   /memory/search?q=<query>&domain=<domain> - Search scraped content\n")
+	fmt.Printf("   GET   /memory/failures?limit=N - Get recent failed scrapes\n")
 	fmt.Printf("   PATCH /memory/snapshot/:id/summary - Update snapshot summary\n")
-	fmt.Printf("   GET   /api/scrapes/history?url=<url> - Get version history for URL\n")
-	fmt.Printf("   GET   /api/scrapes/version/:id - Get a specific version by ID\n")
-	fmt.Printf("   DELETE /api/scrapes/version/:id - Delete a specific version\n")
-	fmt.Printf("   GET   /api/scrapes/diff?url=<url>&from=<ts>&to=<ts> - Diff two versions\n")
-	fmt.Printf("   POST  /api/scrapes/analyze-changes - AI change analysis\n")
+	fmt.Printf("   GET   /memory/history?url=<url> - Get version history for URL\n")
+	fmt.Printf("   GET   /memory/version/:id - Get a specific version by ID\n")
+	fmt.Printf("   DELETE /memory/version/:id - Delete a specific version\n")
+	fmt.Printf("   GET   /memory/diff?url=<url>&from=<ts>&to=<ts> - Diff two versions\n")
+	fmt.Printf("   POST  /memory/analyze-changes - AI change analysis\n")
+	fmt.Printf("   POST  /admin/rebuild-fts5 - Rebuild FTS5 index\n")
+	fmt.Printf("   GET   /admin/test-fts5?q=<query> - Direct FTS5 probe (debug)\n")
 	fmt.Printf("   GET   /prometheus - Prometheus metrics\n")
 
 	return http.ListenAndServe(addr, nil)
