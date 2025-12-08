@@ -362,8 +362,9 @@ func (s *Scraper) scrapeURLSync(ctx context.Context, urlStr string) types.Scrape
 	return s.doScrape(ctx, urlStr)
 }
 
-// ScrapeURLsStreaming scrapes URLs and calls the callback for each result as it arrives
-func (s *Scraper) ScrapeURLsStreaming(urls []string, callback func(types.ScrapedData)) []types.ScrapedData {
+// ScrapeURLsStreaming scrapes URLs and calls the callback for each result as it arrives.
+// The callback receives the result and progress stats (completed vs discovered).
+func (s *Scraper) ScrapeURLsStreaming(urls []string, callback func(*types.ScrapedData, *types.ProgressStats)) []types.ScrapedData {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
@@ -398,10 +399,17 @@ func (s *Scraper) ScrapeURLsStreaming(urls []string, callback func(types.Scraped
 
 	// Collect results and call callback for each one
 	var results []types.ScrapedData
+	completed := 0
+	discovered := len(urls)
 	for data := range resultsChan {
 		results = append(results, data)
+		completed++
 		if callback != nil {
-			callback(data)
+			stats := &types.ProgressStats{
+				Completed:  completed,
+				Discovered: discovered,
+			}
+			callback(&data, stats)
 		}
 	}
 
@@ -411,8 +419,9 @@ func (s *Scraper) ScrapeURLsStreaming(urls []string, callback func(types.Scraped
 	return results
 }
 
-// ScrapeSiteWithConfigStreaming scrapes a site with pagination and calls callback for each result
-func (s *Scraper) ScrapeSiteWithConfigStreaming(startURL string, paginationConfig *types.PaginationConfig, callback func(types.ScrapedData)) []types.ScrapedData {
+// ScrapeSiteWithConfigStreaming scrapes a site with pagination and calls callback for each result.
+// The callback also receives progress stats so callers can track accurate progress.
+func (s *Scraper) ScrapeSiteWithConfigStreaming(startURL string, paginationConfig *types.PaginationConfig, callback func(*types.ScrapedData, *types.ProgressStats)) []types.ScrapedData {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
@@ -442,25 +451,12 @@ func (s *Scraper) ScrapeSiteWithConfigStreaming(startURL string, paginationConfi
 		s.mu.Unlock()
 	}()
 
-	// Create a new results channel for this scraping session
-	resultsChan := make(chan types.ScrapedData, s.config.MaxPages)
-
-	// Start a goroutine to process results and call callback
 	var results []types.ScrapedData
-	resultsDone := make(chan struct{})
-	go func() {
-		for data := range resultsChan {
-			results = append(results, data)
-			if callback != nil {
-				callback(data)
-			}
-		}
-		close(resultsDone)
-	}()
 
 	urlsToScrape := []string{startURL}
 	scrapedURLs := make(map[string]bool)
 	pageCount := 0
+	discoveredCount := 1 // startURL
 
 	for len(urlsToScrape) > 0 && pageCount < s.config.MaxPages {
 		// Pop the next URL
@@ -478,19 +474,31 @@ func (s *Scraper) ScrapeSiteWithConfigStreaming(startURL string, paginationConfi
 		// Scrape this URL and get the result
 		result := s.scrapeURLSync(ctx, url)
 
-		// Add the result to our channel
-		resultsChan <- result
+		// Record the result
+		results = append(results, result)
+		if callback != nil {
+			callback(&result, &types.ProgressStats{
+				Completed:  len(results),
+				Discovered: discoveredCount,
+			})
+		}
 
 		// If we got a next URL and haven't reached max pages, add it to the queue
 		if result.NextURL != "" && pageCount < s.config.MaxPages {
 			urlsToScrape = append(urlsToScrape, result.NextURL)
+			discoveredCount++
+
+			// Emit discovery-only progress update so callers can update totals
+			if callback != nil {
+				callback(nil, &types.ProgressStats{
+					Completed:  len(results),    // pages scraped so far
+					Discovered: discoveredCount, // total known pages
+				})
+			}
+
 			s.logger.Info("Found next page: %s", result.NextURL)
 		}
 	}
-
-	// Close results channel and wait for processing to complete
-	close(resultsChan)
-	<-resultsDone
 
 	// Finish metrics collection
 	s.metrics.Finish()

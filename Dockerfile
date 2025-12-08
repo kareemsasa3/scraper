@@ -20,7 +20,7 @@ RUN go mod download
 COPY . .
 
 # Build the application (entrypoint is now at cmd/arachne)
-RUN CGO_ENABLED=1 GOOS=linux go build -a -o main ./cmd/arachne
+RUN CGO_ENABLED=1 GOOS=linux go build -tags "sqlite_fts5" -a -o main ./cmd/arachne
 
 # Final stage
 FROM alpine:3.20

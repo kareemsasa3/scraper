@@ -4,6 +4,7 @@ import (
 	"crypto/sha256"
 	"database/sql"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"net/url"
 	"strconv"
@@ -21,10 +22,14 @@ type Logger interface {
 	Error(format string, v ...interface{})
 }
 
+// ErrFTS5NotAvailable is returned when SQLite was built without FTS5 support.
+var ErrFTS5NotAvailable = errors.New("fts5 extension not available; rebuild with `-tags sqlite_fts5`")
+
 // DB wraps the SQLite database connection
 type DB struct {
-	conn   *sql.DB
-	logger Logger
+	conn         *sql.DB
+	logger       Logger
+	ftsAvailable bool
 }
 
 // Snapshot represents a scrape history entry in the database.
@@ -44,6 +49,20 @@ type Snapshot struct {
 	PreviousHash  string    `json:"previous_hash,omitempty"`
 	HasChanges    bool      `json:"has_changes"`
 	ChangeSummary string    `json:"change_summary,omitempty"`
+	ScrapeStatus  string    `json:"scrape_status,omitempty"`
+	ErrorMessage  string    `json:"error_message,omitempty"`
+	RetryCount    int       `json:"retry_count,omitempty"`
+}
+
+// SearchResult represents a row returned from full-text search.
+type SearchResult struct {
+	ID        int64     `json:"id"`
+	URL       string    `json:"url"`
+	Domain    string    `json:"domain"`
+	Title     string    `json:"title"`
+	Snippet   string    `json:"snippet"`
+	ScrapedAt time.Time `json:"scraped_at"`
+	Rank      float64   `json:"rank"`
 }
 
 // Initialize creates a new database connection and runs migrations
@@ -90,6 +109,17 @@ func (db *DB) migrate() error {
 		return err
 	}
 
+	if err := db.createFTS5Index(); err != nil {
+		if errors.Is(err, ErrFTS5NotAvailable) {
+			db.logger.Warn("FTS5 extension unavailable; full-text search disabled: %v", err)
+			db.ftsAvailable = false
+		} else {
+			return err
+		}
+	} else {
+		db.ftsAvailable = true
+	}
+
 	return nil
 }
 
@@ -101,13 +131,16 @@ func (db *DB) createHistoryTable() error {
 		domain TEXT,
 		title TEXT,
 		clean_text TEXT,
-		raw_content TEXT NOT NULL,
+		raw_content TEXT,
 		summary TEXT,
-		content_hash TEXT NOT NULL,
+		content_hash TEXT,
 		previous_hash TEXT,
 		has_changes INTEGER DEFAULT 0,
 		change_summary TEXT,
 		status_code INTEGER,
+		scrape_status TEXT DEFAULT 'success',
+		error_message TEXT,
+		retry_count INTEGER DEFAULT 0,
 		scraped_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
 		last_checked_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 	);
@@ -115,12 +148,283 @@ func (db *DB) createHistoryTable() error {
 	CREATE INDEX IF NOT EXISTS idx_history_url_time ON scrape_history(url, scraped_at DESC);
 	CREATE INDEX IF NOT EXISTS idx_history_hash ON scrape_history(content_hash);
 	CREATE INDEX IF NOT EXISTS idx_history_url_hash ON scrape_history(url, content_hash);
+	CREATE INDEX IF NOT EXISTS idx_history_status ON scrape_history(scrape_status);
 	`
 
 	if _, err := db.conn.Exec(schema); err != nil {
 		return fmt.Errorf("failed to create scrape_history schema: %w", err)
 	}
 
+	// Ensure legacy schemas are migrated to the relaxed/nullable version
+	if err := db.migrateHistorySchema(); err != nil {
+		return err
+	}
+
+	return nil
+}
+
+type tableColumn struct {
+	Name    string
+	NotNull bool
+}
+
+// migrateHistorySchema backfills new columns and relaxes NOT NULL constraints introduced
+// for failed scrape tracking.
+func (db *DB) migrateHistorySchema() error {
+	cols, err := db.getTableColumns("scrape_history")
+	if err != nil {
+		return err
+	}
+	if len(cols) == 0 {
+		return nil
+	}
+
+	addColumn := func(name, ddl string) error {
+		if _, exists := cols[name]; exists {
+			return nil
+		}
+		if _, err := db.conn.Exec(ddl); err != nil {
+			return fmt.Errorf("failed to add column %s: %w", name, err)
+		}
+		return nil
+	}
+
+	if err := addColumn("scrape_status", `ALTER TABLE scrape_history ADD COLUMN scrape_status TEXT DEFAULT 'success'`); err != nil {
+		return err
+	}
+	if err := addColumn("error_message", `ALTER TABLE scrape_history ADD COLUMN error_message TEXT`); err != nil {
+		return err
+	}
+	if err := addColumn("retry_count", `ALTER TABLE scrape_history ADD COLUMN retry_count INTEGER DEFAULT 0`); err != nil {
+		return err
+	}
+
+	// Refresh column metadata after ALTERs
+	cols, err = db.getTableColumns("scrape_history")
+	if err != nil {
+		return err
+	}
+
+	needRebuild := false
+	if col, ok := cols["raw_content"]; ok && col.NotNull {
+		needRebuild = true
+	}
+	if col, ok := cols["content_hash"]; ok && col.NotNull {
+		needRebuild = true
+	}
+
+	if needRebuild {
+		if err := db.rebuildScrapeHistoryTable(); err != nil {
+			return err
+		}
+	} else {
+		if _, err := db.conn.Exec(`CREATE INDEX IF NOT EXISTS idx_history_status ON scrape_history(scrape_status);`); err != nil {
+			return fmt.Errorf("failed to ensure status index: %w", err)
+		}
+	}
+
+	return nil
+}
+
+func (db *DB) getTableColumns(table string) (map[string]tableColumn, error) {
+	rows, err := db.conn.Query(fmt.Sprintf("PRAGMA table_info(%s)", table))
+	if err != nil {
+		return nil, fmt.Errorf("failed to inspect table %s: %w", table, err)
+	}
+	defer rows.Close()
+
+	cols := make(map[string]tableColumn)
+	for rows.Next() {
+		var (
+			cid       int
+			name      string
+			colType   string
+			notNull   int
+			dfltValue sql.NullString
+			pk        int
+		)
+		if err := rows.Scan(&cid, &name, &colType, &notNull, &dfltValue, &pk); err != nil {
+			return nil, fmt.Errorf("failed to scan table info for %s: %w", table, err)
+		}
+		cols[name] = tableColumn{
+			Name:    name,
+			NotNull: notNull != 0,
+		}
+	}
+
+	return cols, nil
+}
+
+// rebuildScrapeHistoryTable recreates the scrape_history table with the relaxed schema
+// while preserving existing data.
+func (db *DB) rebuildScrapeHistoryTable() (retErr error) {
+	tx, err := db.conn.Begin()
+	if err != nil {
+		return fmt.Errorf("failed to start scrape_history rebuild: %w", err)
+	}
+	defer func() {
+		if retErr != nil {
+			_ = tx.Rollback()
+		}
+	}()
+
+	create := `
+	CREATE TABLE IF NOT EXISTS scrape_history_new (
+		id INTEGER PRIMARY KEY AUTOINCREMENT,
+		url TEXT NOT NULL,
+		domain TEXT,
+		title TEXT,
+		clean_text TEXT,
+		raw_content TEXT,
+		summary TEXT,
+		content_hash TEXT,
+		previous_hash TEXT,
+		has_changes INTEGER DEFAULT 0,
+		change_summary TEXT,
+		status_code INTEGER,
+		scrape_status TEXT DEFAULT 'success',
+		error_message TEXT,
+		retry_count INTEGER DEFAULT 0,
+		scraped_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+		last_checked_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+	);
+	`
+
+	if _, err := tx.Exec(create); err != nil {
+		retErr = fmt.Errorf("failed to create scrape_history_new: %w", err)
+		return retErr
+	}
+
+	copyStmt := `
+	INSERT INTO scrape_history_new (
+		id, url, domain, title, clean_text, raw_content, summary,
+		content_hash, previous_hash, has_changes, change_summary,
+		status_code, scrape_status, error_message, retry_count,
+		scraped_at, last_checked_at
+	)
+	SELECT
+		id, url, domain, title, clean_text, raw_content, summary,
+		content_hash, previous_hash, has_changes, change_summary,
+		status_code,
+		COALESCE(scrape_status, 'success'),
+		error_message,
+		COALESCE(retry_count, 0),
+		scraped_at, last_checked_at
+	FROM scrape_history;
+	`
+
+	if _, err := tx.Exec(copyStmt); err != nil {
+		retErr = fmt.Errorf("failed to copy data into scrape_history_new: %w", err)
+		return retErr
+	}
+
+	if _, err := tx.Exec(`DROP TABLE scrape_history`); err != nil {
+		retErr = fmt.Errorf("failed to drop old scrape_history: %w", err)
+		return retErr
+	}
+
+	if _, err := tx.Exec(`ALTER TABLE scrape_history_new RENAME TO scrape_history`); err != nil {
+		retErr = fmt.Errorf("failed to rename scrape_history_new: %w", err)
+		return retErr
+	}
+
+	indexes := `
+	CREATE INDEX IF NOT EXISTS idx_history_url_time ON scrape_history(url, scraped_at DESC);
+	CREATE INDEX IF NOT EXISTS idx_history_hash ON scrape_history(content_hash);
+	CREATE INDEX IF NOT EXISTS idx_history_url_hash ON scrape_history(url, content_hash);
+	CREATE INDEX IF NOT EXISTS idx_history_status ON scrape_history(scrape_status);
+	`
+
+	if _, err := tx.Exec(indexes); err != nil {
+		retErr = fmt.Errorf("failed to recreate indexes for scrape_history: %w", err)
+		return retErr
+	}
+
+	if err := tx.Commit(); err != nil {
+		retErr = fmt.Errorf("failed to commit scrape_history rebuild: %w", err)
+		return retErr
+	}
+
+	db.logger.Info("Rebuilt scrape_history with relaxed constraints and failure tracking")
+	return nil
+}
+
+// createFTS5Index sets up the FTS5 virtual table, backfills existing data,
+// and installs triggers to keep the index in sync with scrape_history.
+func (db *DB) createFTS5Index() error {
+	createTable := `
+	CREATE VIRTUAL TABLE IF NOT EXISTS scrape_search USING fts5(
+		url,
+		domain,
+		title,
+		clean_text,
+		summary,
+		content='scrape_history',
+		content_rowid='id'
+	);
+	`
+
+	if _, err := db.conn.Exec(createTable); err != nil {
+		if strings.Contains(err.Error(), "no such module: fts5") {
+			return fmt.Errorf("%w: %v", ErrFTS5NotAvailable, err)
+		}
+		return fmt.Errorf("failed to create FTS5 virtual table: %w", err)
+	}
+
+	if _, err := db.conn.Exec(`
+		INSERT INTO scrape_search(rowid, url, domain, title, clean_text, summary)
+		SELECT id, url, domain, title, clean_text, summary
+		FROM scrape_history
+		WHERE id NOT IN (SELECT rowid FROM scrape_search)
+	`); err != nil {
+		return fmt.Errorf("failed to backfill FTS5 index: %w", err)
+	}
+
+	triggers := `
+	CREATE TRIGGER IF NOT EXISTS scrape_history_ai AFTER INSERT ON scrape_history BEGIN
+		INSERT INTO scrape_search(rowid, url, domain, title, clean_text, summary)
+		VALUES (new.id, new.url, new.domain, new.title, new.clean_text, new.summary);
+	END;
+
+	CREATE TRIGGER IF NOT EXISTS scrape_history_au AFTER UPDATE ON scrape_history BEGIN
+		UPDATE scrape_search SET
+			url = new.url,
+			domain = new.domain,
+			title = new.title,
+			clean_text = new.clean_text,
+			summary = new.summary
+		WHERE rowid = new.id;
+	END;
+
+	CREATE TRIGGER IF NOT EXISTS scrape_history_ad AFTER DELETE ON scrape_history BEGIN
+		DELETE FROM scrape_search WHERE rowid = old.id;
+	END;
+	`
+
+	if _, err := db.conn.Exec(triggers); err != nil {
+		return fmt.Errorf("failed to create FTS5 triggers: %w", err)
+	}
+
+	return nil
+}
+
+// RebuildFTS5 drops and recreates the FTS5 index from scratch.
+func (db *DB) RebuildFTS5() error {
+	if !db.ftsAvailable {
+		return ErrFTS5NotAvailable
+	}
+
+	if _, err := db.conn.Exec(`DROP TABLE IF EXISTS scrape_search;`); err != nil {
+		return fmt.Errorf("failed to drop FTS5 table: %w", err)
+	}
+	if err := db.createFTS5Index(); err != nil {
+		if errors.Is(err, ErrFTS5NotAvailable) {
+			db.ftsAvailable = false
+		}
+		return err
+	}
+
+	db.ftsAvailable = true
 	return nil
 }
 
@@ -249,8 +553,9 @@ func (db *DB) SaveSnapshot(snapshot *Snapshot) error {
 	query := `
 		INSERT INTO scrape_history (
 			url, domain, title, clean_text, raw_content, summary, content_hash,
-			previous_hash, has_changes, change_summary, status_code, scraped_at, last_checked_at
-		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+			previous_hash, has_changes, change_summary, status_code, scrape_status,
+			error_message, retry_count, scraped_at, last_checked_at
+		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'success', NULL, 0, ?, ?)
 	`
 
 	result, err := db.conn.Exec(
@@ -266,6 +571,7 @@ func (db *DB) SaveSnapshot(snapshot *Snapshot) error {
 		boolToInt(hasChanges),
 		snapshot.ChangeSummary,
 		snapshot.StatusCode,
+		// scrape_status fixed as success
 		snapshot.ScrapedAt,
 		snapshot.LastCheckedAt,
 	)
@@ -289,12 +595,39 @@ func (db *DB) SaveSnapshot(snapshot *Snapshot) error {
 	return nil
 }
 
+// SaveFailedScrape records a failed scrape attempt, allowing nullable content/hash.
+func (db *DB) SaveFailedScrape(url, domain string, statusCode int, errorMsg, scrapeStatus string) error {
+	stmt := `
+		INSERT INTO scrape_history (
+			url, domain, status_code, scrape_status, error_message,
+			retry_count, scraped_at, last_checked_at
+		) VALUES (?, ?, ?, ?, ?, 0, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+	`
+	if _, err := db.conn.Exec(stmt, url, domain, statusCode, scrapeStatus, errorMsg); err != nil {
+		return fmt.Errorf("failed to save failed scrape: %w", err)
+	}
+	return nil
+}
+
+// UpdateRetryCount increments the retry counter for the most recent attempt of a URL.
+func (db *DB) UpdateRetryCount(url string) error {
+	_, err := db.conn.Exec(`
+		UPDATE scrape_history
+		SET retry_count = retry_count + 1,
+			last_checked_at = CURRENT_TIMESTAMP
+		WHERE url = ?
+		ORDER BY scraped_at DESC
+		LIMIT 1
+	`, url)
+	return err
+}
+
 // GetLatestSnapshot retrieves the most recent snapshot for a given URL
 func (db *DB) GetLatestSnapshot(urlStr string) (*Snapshot, error) {
 	query := `
 		SELECT id, url, domain, title, clean_text, raw_content, summary,
 		       content_hash, previous_hash, has_changes, change_summary,
-		       status_code, scraped_at, last_checked_at
+		       status_code, scraped_at, last_checked_at, scrape_status, error_message, retry_count
 		FROM scrape_history
 		WHERE url = ?
 		ORDER BY scraped_at DESC
@@ -307,6 +640,9 @@ func (db *DB) GetLatestSnapshot(urlStr string) (*Snapshot, error) {
 	var changeSummary sql.NullString
 	var hasChangesInt int
 	var id int64
+	var scrapeStatus sql.NullString
+	var errorMessage sql.NullString
+	var retryCount sql.NullInt64
 	err := db.conn.QueryRow(query, urlStr).Scan(
 		&id,
 		&snapshot.URL,
@@ -322,6 +658,9 @@ func (db *DB) GetLatestSnapshot(urlStr string) (*Snapshot, error) {
 		&snapshot.StatusCode,
 		&snapshot.ScrapedAt,
 		&snapshot.LastCheckedAt,
+		&scrapeStatus,
+		&errorMessage,
+		&retryCount,
 	)
 
 	if err == sql.ErrNoRows {
@@ -341,6 +680,15 @@ func (db *DB) GetLatestSnapshot(urlStr string) (*Snapshot, error) {
 	if changeSummary.Valid {
 		snapshot.ChangeSummary = changeSummary.String
 	}
+	if scrapeStatus.Valid {
+		snapshot.ScrapeStatus = scrapeStatus.String
+	}
+	if errorMessage.Valid {
+		snapshot.ErrorMessage = errorMessage.String
+	}
+	if retryCount.Valid {
+		snapshot.RetryCount = int(retryCount.Int64)
+	}
 	snapshot.HasChanges = hasChangesInt != 0
 	snapshot.ID = strconv.FormatInt(id, 10)
 
@@ -352,7 +700,7 @@ func (db *DB) GetSnapshotByID(id string) (*Snapshot, error) {
 	query := `
 		SELECT id, url, domain, title, clean_text, raw_content, summary,
 		       content_hash, previous_hash, has_changes, change_summary,
-		       status_code, scraped_at, last_checked_at
+		       status_code, scraped_at, last_checked_at, scrape_status, error_message, retry_count
 		FROM scrape_history
 		WHERE id = ?
 	`
@@ -363,6 +711,9 @@ func (db *DB) GetSnapshotByID(id string) (*Snapshot, error) {
 	var changeSummary sql.NullString
 	var hasChangesInt int
 	var numericID int64
+	var scrapeStatus sql.NullString
+	var errorMessage sql.NullString
+	var retryCount sql.NullInt64
 	err := db.conn.QueryRow(query, id).Scan(
 		&numericID,
 		&snapshot.URL,
@@ -378,6 +729,9 @@ func (db *DB) GetSnapshotByID(id string) (*Snapshot, error) {
 		&snapshot.StatusCode,
 		&snapshot.ScrapedAt,
 		&snapshot.LastCheckedAt,
+		&scrapeStatus,
+		&errorMessage,
+		&retryCount,
 	)
 
 	if err == sql.ErrNoRows {
@@ -397,6 +751,15 @@ func (db *DB) GetSnapshotByID(id string) (*Snapshot, error) {
 	if changeSummary.Valid {
 		snapshot.ChangeSummary = changeSummary.String
 	}
+	if scrapeStatus.Valid {
+		snapshot.ScrapeStatus = scrapeStatus.String
+	}
+	if errorMessage.Valid {
+		snapshot.ErrorMessage = errorMessage.String
+	}
+	if retryCount.Valid {
+		snapshot.RetryCount = int(retryCount.Int64)
+	}
 	snapshot.HasChanges = hasChangesInt != 0
 	snapshot.ID = strconv.FormatInt(numericID, 10)
 
@@ -408,7 +771,7 @@ func (db *DB) GetHistoryByURL(urlStr string) ([]*Snapshot, error) {
 	query := `
 		SELECT id, url, domain, title, clean_text, raw_content, summary,
 		       content_hash, previous_hash, has_changes, change_summary,
-		       status_code, scraped_at, last_checked_at
+		       status_code, scraped_at, last_checked_at, scrape_status, error_message, retry_count
 		FROM scrape_history
 		WHERE url = ?
 		ORDER BY scraped_at DESC
@@ -428,6 +791,9 @@ func (db *DB) GetHistoryByURL(urlStr string) ([]*Snapshot, error) {
 		var changeSummary sql.NullString
 		var hasChangesInt int
 		var id int64
+		var scrapeStatus sql.NullString
+		var errorMessage sql.NullString
+		var retryCount sql.NullInt64
 		if err := rows.Scan(
 			&id,
 			&snapshot.URL,
@@ -443,6 +809,9 @@ func (db *DB) GetHistoryByURL(urlStr string) ([]*Snapshot, error) {
 			&snapshot.StatusCode,
 			&snapshot.ScrapedAt,
 			&snapshot.LastCheckedAt,
+			&scrapeStatus,
+			&errorMessage,
+			&retryCount,
 		); err != nil {
 			return nil, fmt.Errorf("failed to scan history row: %w", err)
 		}
@@ -454,6 +823,15 @@ func (db *DB) GetHistoryByURL(urlStr string) ([]*Snapshot, error) {
 		}
 		if changeSummary.Valid {
 			snapshot.ChangeSummary = changeSummary.String
+		}
+		if scrapeStatus.Valid {
+			snapshot.ScrapeStatus = scrapeStatus.String
+		}
+		if errorMessage.Valid {
+			snapshot.ErrorMessage = errorMessage.String
+		}
+		if retryCount.Valid {
+			snapshot.RetryCount = int(retryCount.Int64)
 		}
 		snapshot.HasChanges = hasChangesInt != 0
 		snapshot.ID = strconv.FormatInt(id, 10)
@@ -468,7 +846,7 @@ func (db *DB) GetSnapshotByTimestamp(urlStr string, ts time.Time) (*Snapshot, er
 	query := `
 		SELECT id, url, domain, title, clean_text, raw_content, summary,
 		       content_hash, previous_hash, has_changes, change_summary,
-		       status_code, scraped_at, last_checked_at
+		       status_code, scraped_at, last_checked_at, scrape_status, error_message, retry_count
 		FROM scrape_history
 		WHERE url = ? AND scraped_at = ?
 		LIMIT 1
@@ -480,6 +858,9 @@ func (db *DB) GetSnapshotByTimestamp(urlStr string, ts time.Time) (*Snapshot, er
 	var changeSummary sql.NullString
 	var hasChangesInt int
 	var id int64
+	var scrapeStatus sql.NullString
+	var errorMessage sql.NullString
+	var retryCount sql.NullInt64
 	err := db.conn.QueryRow(query, urlStr, ts).Scan(
 		&id,
 		&snapshot.URL,
@@ -495,6 +876,9 @@ func (db *DB) GetSnapshotByTimestamp(urlStr string, ts time.Time) (*Snapshot, er
 		&snapshot.StatusCode,
 		&snapshot.ScrapedAt,
 		&snapshot.LastCheckedAt,
+		&scrapeStatus,
+		&errorMessage,
+		&retryCount,
 	)
 
 	if err == sql.ErrNoRows {
@@ -513,6 +897,15 @@ func (db *DB) GetSnapshotByTimestamp(urlStr string, ts time.Time) (*Snapshot, er
 	if changeSummary.Valid {
 		snapshot.ChangeSummary = changeSummary.String
 	}
+	if scrapeStatus.Valid {
+		snapshot.ScrapeStatus = scrapeStatus.String
+	}
+	if errorMessage.Valid {
+		snapshot.ErrorMessage = errorMessage.String
+	}
+	if retryCount.Valid {
+		snapshot.RetryCount = int(retryCount.Int64)
+	}
 	snapshot.HasChanges = hasChangesInt != 0
 	snapshot.ID = strconv.FormatInt(id, 10)
 
@@ -524,7 +917,7 @@ func (db *DB) GetSnapshotsByDomain(domain string, limit int) ([]*Snapshot, error
 	query := `
 		SELECT id, url, domain, title, clean_text, raw_content, summary,
 		       content_hash, previous_hash, has_changes, change_summary,
-		       status_code, scraped_at, last_checked_at
+		       status_code, scraped_at, last_checked_at, scrape_status, error_message, retry_count
 		FROM scrape_history
 		WHERE domain = ?
 		ORDER BY scraped_at DESC
@@ -545,6 +938,9 @@ func (db *DB) GetSnapshotsByDomain(domain string, limit int) ([]*Snapshot, error
 		var changeSummary sql.NullString
 		var hasChangesInt int
 		var id int64
+		var scrapeStatus sql.NullString
+		var errorMessage sql.NullString
+		var retryCount sql.NullInt64
 		err := rows.Scan(
 			&id,
 			&snapshot.URL,
@@ -560,6 +956,9 @@ func (db *DB) GetSnapshotsByDomain(domain string, limit int) ([]*Snapshot, error
 			&snapshot.StatusCode,
 			&snapshot.ScrapedAt,
 			&snapshot.LastCheckedAt,
+			&scrapeStatus,
+			&errorMessage,
+			&retryCount,
 		)
 		if err != nil {
 			return nil, fmt.Errorf("failed to scan snapshot: %w", err)
@@ -572,6 +971,15 @@ func (db *DB) GetSnapshotsByDomain(domain string, limit int) ([]*Snapshot, error
 		}
 		if changeSummary.Valid {
 			snapshot.ChangeSummary = changeSummary.String
+		}
+		if scrapeStatus.Valid {
+			snapshot.ScrapeStatus = scrapeStatus.String
+		}
+		if errorMessage.Valid {
+			snapshot.ErrorMessage = errorMessage.String
+		}
+		if retryCount.Valid {
+			snapshot.RetryCount = int(retryCount.Int64)
 		}
 		snapshot.HasChanges = hasChangesInt != 0
 		snapshot.ID = strconv.FormatInt(id, 10)
@@ -700,7 +1108,7 @@ func (db *DB) GetRecentSnapshots(limit, offset int) ([]*Snapshot, int, error) {
 	query := `
 		SELECT id, url, domain, title, clean_text, raw_content, summary,
 		       content_hash, previous_hash, has_changes, change_summary,
-		       status_code, scraped_at, last_checked_at
+		       status_code, scraped_at, last_checked_at, scrape_status, error_message, retry_count
 		FROM scrape_history
 		ORDER BY scraped_at DESC
 		LIMIT ? OFFSET ?
@@ -720,6 +1128,9 @@ func (db *DB) GetRecentSnapshots(limit, offset int) ([]*Snapshot, int, error) {
 		var changeSummary sql.NullString
 		var hasChangesInt int
 		var id int64
+		var scrapeStatus sql.NullString
+		var errorMessage sql.NullString
+		var retryCount sql.NullInt64
 		err := rows.Scan(
 			&id,
 			&snapshot.URL,
@@ -735,6 +1146,9 @@ func (db *DB) GetRecentSnapshots(limit, offset int) ([]*Snapshot, int, error) {
 			&snapshot.StatusCode,
 			&snapshot.ScrapedAt,
 			&snapshot.LastCheckedAt,
+			&scrapeStatus,
+			&errorMessage,
+			&retryCount,
 		)
 		if err != nil {
 			return nil, 0, fmt.Errorf("failed to scan snapshot: %w", err)
@@ -748,6 +1162,15 @@ func (db *DB) GetRecentSnapshots(limit, offset int) ([]*Snapshot, int, error) {
 		if changeSummary.Valid {
 			snapshot.ChangeSummary = changeSummary.String
 		}
+		if scrapeStatus.Valid {
+			snapshot.ScrapeStatus = scrapeStatus.String
+		}
+		if errorMessage.Valid {
+			snapshot.ErrorMessage = errorMessage.String
+		}
+		if retryCount.Valid {
+			snapshot.RetryCount = int(retryCount.Int64)
+		}
 		snapshot.HasChanges = hasChangesInt != 0
 		snapshot.ID = strconv.FormatInt(id, 10)
 		snapshots = append(snapshots, &snapshot)
@@ -758,6 +1181,83 @@ func (db *DB) GetRecentSnapshots(limit, offset int) ([]*Snapshot, int, error) {
 	}
 
 	return snapshots, total, nil
+}
+
+// SearchContent performs full-text search across stored snapshots.
+func (db *DB) SearchContent(query string, domainFilter string, limit int, offset int) ([]SearchResult, error) {
+	if !db.ftsAvailable {
+		return nil, ErrFTS5NotAvailable
+	}
+
+	if limit <= 0 {
+		limit = 20
+	}
+	if limit > 100 {
+		limit = 100
+	}
+	if offset < 0 {
+		offset = 0
+	}
+
+	sqlQuery := `
+		SELECT
+			s.id,
+			s.url,
+			s.domain,
+			s.title,
+			snippet(scrape_search, 3, '<mark>', '</mark>', '...', 32) as snippet,
+			s.scraped_at,
+			bm25(scrape_search) as rank
+		FROM scrape_search
+		JOIN scrape_history s ON s.id = scrape_search.rowid
+		WHERE scrape_search MATCH ?
+		AND s.scrape_status = 'success'
+	`
+
+	args := []interface{}{query}
+
+	if domainFilter != "" {
+		sqlQuery += " AND s.domain = ?"
+		args = append(args, domainFilter)
+	}
+
+	sqlQuery += " ORDER BY rank, s.scraped_at DESC LIMIT ? OFFSET ?"
+	args = append(args, limit, offset)
+
+	rows, err := db.conn.Query(sqlQuery, args...)
+	if err != nil {
+		return nil, fmt.Errorf("search query failed: %w", err)
+	}
+	defer rows.Close()
+
+	var results []SearchResult
+	for rows.Next() {
+		var (
+			r       SearchResult
+			title   sql.NullString
+			snippet sql.NullString
+		)
+
+		if err := rows.Scan(&r.ID, &r.URL, &r.Domain, &title, &snippet, &r.ScrapedAt, &r.Rank); err != nil {
+			return nil, err
+		}
+
+		if title.Valid {
+			r.Title = title.String
+		}
+		if snippet.Valid {
+			r.Snippet = snippet.String
+		}
+
+		results = append(results, r)
+	}
+
+	return results, nil
+}
+
+// HasFTS5 reports whether the database was initialized with FTS5 support.
+func (db *DB) HasFTS5() bool {
+	return db != nil && db.ftsAvailable
 }
 
 // GetStats returns database statistics
@@ -806,4 +1306,14 @@ func boolToInt(v bool) int {
 		return 1
 	}
 	return 0
+}
+
+// ExecRaw exposes a thin wrapper for executing arbitrary SQL (used by admin/debug tooling).
+func (db *DB) ExecRaw(query string, args ...interface{}) (sql.Result, error) {
+	return db.conn.Exec(query, args...)
+}
+
+// QueryRaw exposes a thin wrapper for querying arbitrary SQL (used by admin/debug tooling).
+func (db *DB) QueryRaw(query string, args ...interface{}) (*sql.Rows, error) {
+	return db.conn.Query(query, args...)
 }
