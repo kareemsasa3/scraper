@@ -1117,7 +1117,7 @@ func (h *APIHandler) HandleAnalyzeChanges(w http.ResponseWriter, r *http.Request
 
 	backendURL := os.Getenv("AI_BACKEND_URL")
 	if backendURL == "" {
-		backendURL = "http://ai-backend:3001/analyze-changes"
+		backendURL = "http://ai:3001/analyze-changes"
 	}
 	payload := map[string]string{
 		"diff":          diffText,
