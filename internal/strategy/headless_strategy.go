@@ -60,18 +60,31 @@ func (s *HeadlessStrategy) Execute(ctx context.Context, urlStr string, cfg *conf
 	defer os.RemoveAll(profileDir)
 	debugLog(urlStr, "  Created temp profile dir: %s | elapsed=%v", profileDir, time.Since(startTime))
 
+	disableFeatures := []string{
+		"Crashpad",
+		"CrashpadDebugMode",
+		"UseChromeOSCrashReporter",
+		"EnableCrashReporter",
+		"Breakpad",
+	}
+
 	// Create chromedp context with options; security-related flags are configurable
 	opts := append(chromedp.DefaultExecAllocatorOptions[:],
 		// Use the unique temporary profile directory for this scrape
 		chromedp.Flag("user-data-dir", profileDir),
 		// --- Best Practice Flags for a Clean Run ---
-		chromedp.Flag("headless", "new"),                                // Use new headless mode (Chrome 112+)
+		chromedp.Flag("headless", true),                                 // Legacy headless avoids crashpad requirement
 		chromedp.Flag("disable-blink-features", "AutomationControlled"), // Minimal stealth
 		chromedp.Flag("window-size", "1920,1080"),                       // Realistic desktop viewport
 		chromedp.Flag("disable-gpu", true),
 		chromedp.Flag("disable-extensions", true),
 		chromedp.Flag("no-first-run", true),
 		chromedp.Flag("no-default-browser-check", true),
+		// Avoid crashpad requiring a database path in containerized Chrome
+		chromedp.Flag("disable-crashpad", true),
+		chromedp.Flag("no-crashpad", true),
+		chromedp.Flag("disable-breakpad", true),
+		chromedp.Flag("disable-crash-reporter", true),
 	)
 
 	// Check for Chrome binary in common locations (especially for Alpine/container environments)
@@ -103,10 +116,13 @@ func (s *HeadlessStrategy) Execute(ctx context.Context, urlStr string, cfg *conf
 			chromedp.Flag("disable-gl-drawing-for-tests", true),       // Disable GL drawing
 			chromedp.Flag("use-gl", "angle"),                          // Use ANGLE for GL
 			chromedp.Flag("use-angle", "swiftshader"),                 // Use SwiftShader (software)
-			chromedp.Flag("disable-features", "VizDisplayCompositor"), // Disable Viz
 		)
+		disableFeatures = append(disableFeatures, "VizDisplayCompositor")
 		debugLog(urlStr, "  Added container-friendly flags (GPU disabled)")
 	}
+
+	// Consolidate disable-features flags (prevents crashpad invocation)
+	opts = append(opts, chromedp.Flag("disable-features", strings.Join(disableFeatures, ",")))
 
 	// Only enable no-sandbox when explicitly configured (not recommended in prod)
 	if cfg.HeadlessNoSandbox {

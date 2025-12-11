@@ -358,6 +358,8 @@ type SnapshotResponse struct {
 	Title         string    `json:"title"`
 	ContentHash   string    `json:"content_hash"`
 	Summary       string    `json:"summary,omitempty"`
+	CleanText     string    `json:"clean_text,omitempty"`
+	RawContent    string    `json:"raw_content,omitempty"`
 	ScrapedAt     time.Time `json:"scraped_at"`
 	LastCheckedAt time.Time `json:"last_checked_at"`
 	AgeHours      float64   `json:"age_hours"`
@@ -479,6 +481,8 @@ func (h *APIHandler) HandleMemoryLookup(w http.ResponseWriter, r *http.Request) 
 			Title:         snapshot.Title,
 			ContentHash:   snapshot.ContentHash,
 			Summary:       snapshot.Summary,
+			CleanText:     snapshot.CleanText,
+			RawContent:    snapshot.RawContent,
 			ScrapedAt:     snapshot.ScrapedAt,
 			LastCheckedAt: snapshot.LastCheckedAt,
 			AgeHours:      ageHours,

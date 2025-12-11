@@ -53,6 +53,9 @@ Thumbs.db
 tmp/
 temp/
 
+# Build caches
+.cache/
+
 # Docker volumes and data
 redis_data/
 scraping_results/
