@@ -23,7 +23,7 @@ COPY . .
 RUN CGO_ENABLED=1 GOOS=linux go build -tags "sqlite_fts5" -a -o main ./cmd/arachne
 
 # Final stage
-FROM alpine:3.20
+FROM alpine:3.19
 
 # Install Chrome and dependencies for headless browsing
 RUN apk --no-cache add \

@@ -78,10 +78,32 @@ func Initialize(dbPath string, log Logger) (*DB, error) {
 	conn.SetMaxIdleConns(5)
 	conn.SetConnMaxLifetime(time.Hour)
 
-	// Enable WAL mode for better concurrent write performance
-	if _, err := conn.Exec("PRAGMA journal_mode=WAL"); err != nil {
+	// Configure SQLite for better reliability and concurrent access
+	pragmas := []string{
+		"PRAGMA journal_mode=WAL",           // Write-Ahead Logging for concurrent access
+		"PRAGMA busy_timeout=5000",           // Wait up to 5 seconds for locks
+		"PRAGMA synchronous=NORMAL",         // Balance between safety and performance
+		"PRAGMA foreign_keys=ON",            // Enable foreign key constraints
+		"PRAGMA temp_store=MEMORY",          // Use memory for temp tables
+	}
+
+	for _, pragma := range pragmas {
+		if _, err := conn.Exec(pragma); err != nil {
+			conn.Close()
+			return nil, fmt.Errorf("failed to set %s: %w", pragma, err)
+		}
+	}
+
+	// Check database integrity
+	var integrityResult string
+	if err := conn.QueryRow("PRAGMA quick_check").Scan(&integrityResult); err != nil {
 		conn.Close()
-		return nil, fmt.Errorf("failed to enable WAL mode: %w", err)
+		return nil, fmt.Errorf("failed to check database integrity: %w", err)
+	}
+
+	if integrityResult != "ok" {
+		conn.Close()
+		return nil, fmt.Errorf("database integrity check failed: %s. The database may be corrupted. Consider restoring from backup or recreating the database", integrityResult)
 	}
 
 	db := &DB{
@@ -196,6 +218,15 @@ func (db *DB) migrateHistorySchema() error {
 		return err
 	}
 	if err := addColumn("retry_count", `ALTER TABLE scrape_history ADD COLUMN retry_count INTEGER DEFAULT 0`); err != nil {
+		return err
+	}
+	if err := addColumn("has_changes", `ALTER TABLE scrape_history ADD COLUMN has_changes INTEGER DEFAULT 0`); err != nil {
+		return err
+	}
+	if err := addColumn("change_summary", `ALTER TABLE scrape_history ADD COLUMN change_summary TEXT`); err != nil {
+		return err
+	}
+	if err := addColumn("last_checked_at", `ALTER TABLE scrape_history ADD COLUMN last_checked_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP`); err != nil {
 		return err
 	}
 
@@ -995,6 +1026,21 @@ func (db *DB) UpdateSnapshotSummary(snapshotID string, summary string) error {
 
 	result, err := db.conn.Exec(query, summary, snapshotID)
 	if err != nil {
+		// Check if this is a database corruption error
+		errStr := err.Error()
+		if strings.Contains(errStr, "database disk image is malformed") ||
+			strings.Contains(errStr, "malformed") ||
+			strings.Contains(errStr, "corrupt") {
+			db.logger.Error("Database corruption detected during summary update: %v", err)
+			// Try to run integrity check
+			var integrityResult string
+			if checkErr := db.conn.QueryRow("PRAGMA quick_check").Scan(&integrityResult); checkErr == nil {
+				if integrityResult != "ok" {
+					db.logger.Error("Database integrity check confirms corruption: %s", integrityResult)
+					return fmt.Errorf("database corruption detected: %s. Please restore from backup or recreate the database", integrityResult)
+				}
+			}
+		}
 		return fmt.Errorf("failed to update snapshot summary: %w", err)
 	}
 
@@ -1076,9 +1122,7 @@ func extractDomain(urlStr string) (string, error) {
 	domain := parsed.Host
 
 	// Remove www. prefix if present
-	if strings.HasPrefix(domain, "www.") {
-		domain = domain[4:]
-	}
+	domain = strings.TrimPrefix(domain, "www.")
 
 	return domain, nil
 }
@@ -1123,6 +1167,7 @@ func (db *DB) GetRecentSnapshots(limit, offset int) ([]*Snapshot, int, error) {
 	var snapshots []*Snapshot
 	for rows.Next() {
 		var snapshot Snapshot
+		var title sql.NullString
 		var summary sql.NullString
 		var previousHash sql.NullString
 		var changeSummary sql.NullString
@@ -1135,7 +1180,7 @@ func (db *DB) GetRecentSnapshots(limit, offset int) ([]*Snapshot, int, error) {
 			&id,
 			&snapshot.URL,
 			&snapshot.Domain,
-			&snapshot.Title,
+			&title,
 			&snapshot.CleanText,
 			&snapshot.RawContent,
 			&summary,
@@ -1152,6 +1197,9 @@ func (db *DB) GetRecentSnapshots(limit, offset int) ([]*Snapshot, int, error) {
 		)
 		if err != nil {
 			return nil, 0, fmt.Errorf("failed to scan snapshot: %w", err)
+		}
+		if title.Valid {
+			snapshot.Title = title.String
 		}
 		if summary.Valid {
 			snapshot.Summary = summary.String

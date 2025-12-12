@@ -252,7 +252,7 @@ func (h *APIHandler) executeScrapingJob(job *storage.ScrapingJob) {
 				if err := h.database.SaveSnapshot(snapshot); err != nil {
 					fmt.Printf("Warning: Failed to save snapshot for %s: %v\n", data.URL, err)
 				}
-			} else if h.database != nil && data != nil && (data.Error != "" || data.Status >= 400 || data.Status == 0) {
+			} else if h.database != nil && (data.Error != "" || data.Status >= 400 || data.Status == 0) {
 				// Capture failures to avoid losing recent error states
 				scrapeStatus := classifyFailureStatus(data.Status, data.Error)
 				domain := ""
@@ -1008,14 +1008,17 @@ func (h *APIHandler) HandleUpdateSnapshotSummary(w http.ResponseWriter, r *http.
 		return
 	}
 
-	// Extract snapshot ID from URL path (e.g., /memory/snapshot/uuid/summary)
-	path := r.URL.Path
+	// Extract snapshot ID from URL path (e.g., /memory/snapshot/{id}/summary)
+	path := strings.TrimPrefix(r.URL.Path, "/")
 	parts := strings.Split(path, "/")
-	if len(parts) < 4 {
-		http.Error(w, "Invalid URL path", http.StatusBadRequest)
+	
+	// Expected path structure: memory/snapshot/{id}/summary
+	// After split: ["memory", "snapshot", "{id}", "summary"]
+	if len(parts) < 4 || parts[0] != "memory" || parts[1] != "snapshot" || parts[3] != "summary" {
+		http.Error(w, fmt.Sprintf("Invalid URL path. Expected /memory/snapshot/{id}/summary, got %s", r.URL.Path), http.StatusBadRequest)
 		return
 	}
-	snapshotID := parts[3] // Gets the UUID from /memory/snapshot/{id}/summary
+	snapshotID := parts[2] // Gets the ID from /memory/snapshot/{id}/summary
 
 	// Parse request body
 	var req UpdateSummaryRequest
@@ -1034,7 +1037,11 @@ func (h *APIHandler) HandleUpdateSnapshotSummary(w http.ResponseWriter, r *http.
 	if err != nil {
 		if strings.Contains(err.Error(), "not found") {
 			http.Error(w, fmt.Sprintf("Snapshot not found: %s", snapshotID), http.StatusNotFound)
+		} else if strings.Contains(err.Error(), "corruption") || strings.Contains(err.Error(), "malformed") {
+			log.Printf("Database corruption detected: %v", err)
+			http.Error(w, fmt.Sprintf("Database corruption detected. Please check server logs and restore from backup if available. Error: %v", err), http.StatusInternalServerError)
 		} else {
+			log.Printf("Failed to update summary: %v", err)
 			http.Error(w, fmt.Sprintf("Failed to update summary: %v", err), http.StatusInternalServerError)
 		}
 		return
@@ -1415,6 +1422,10 @@ func StartAPIServer(scraper ScraperInterface, cfg *config.Config, port int, dbPa
 	http.HandleFunc("/memory/version/", corsMiddleware(handler.HandleScrapeVersion))
 	http.HandleFunc("/memory/diff", corsMiddleware(handler.HandleScrapeDiff))
 	http.HandleFunc("/memory/analyze-changes", corsMiddleware(handler.HandleAnalyzeChanges))
+	http.HandleFunc("/api/v1/analytics/summary", corsMiddleware(handler.HandleGetAnalyticsSummary))
+	http.HandleFunc("/api/v1/analytics/timeseries", corsMiddleware(handler.HandleGetTimeSeriesData))
+	http.HandleFunc("/api/v1/analytics/domains", corsMiddleware(handler.HandleGetTopDomains))
+	http.HandleFunc("/api/v1/analytics/recent", corsMiddleware(handler.HandleGetRecentScrapes))
 	http.HandleFunc("/admin/rebuild-fts5", corsMiddleware(handler.HandleRebuildFTS5))
 	http.HandleFunc("/admin/test-fts5", corsMiddleware(handler.HandleTestFTS5))
 
@@ -1447,6 +1458,10 @@ func StartAPIServer(scraper ScraperInterface, cfg *config.Config, port int, dbPa
 	fmt.Printf("   DELETE /memory/version/:id - Delete a specific version\n")
 	fmt.Printf("   GET   /memory/diff?url=<url>&from=<ts>&to=<ts> - Diff two versions\n")
 	fmt.Printf("   POST  /memory/analyze-changes - AI change analysis\n")
+	fmt.Printf("   GET   /api/v1/analytics/summary - Analytics summary\n")
+	fmt.Printf("   GET   /api/v1/analytics/timeseries?days=N - Analytics time series\n")
+	fmt.Printf("   GET   /api/v1/analytics/domains?limit=N - Top domains\n")
+	fmt.Printf("   GET   /api/v1/analytics/recent?limit=N - Recent scrapes\n")
 	fmt.Printf("   POST  /admin/rebuild-fts5 - Rebuild FTS5 index\n")
 	fmt.Printf("   GET   /admin/test-fts5?q=<query> - Direct FTS5 probe (debug)\n")
 	fmt.Printf("   GET   /prometheus - Prometheus metrics\n")
