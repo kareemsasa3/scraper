@@ -11,7 +11,7 @@ import (
 	"strings"
 	"time"
 
-	_ "github.com/mattn/go-sqlite3"
+	"github.com/mattn/go-sqlite3"
 )
 
 // Logger interface for database logging
@@ -74,17 +74,18 @@ func Initialize(dbPath string, log Logger) (*DB, error) {
 	}
 
 	// Configure connection pool
-	conn.SetMaxOpenConns(25)
-	conn.SetMaxIdleConns(5)
-	conn.SetConnMaxLifetime(time.Hour)
+	// Configure connection pool - SQLite works best with single writer
+	conn.SetMaxOpenConns(1)
+	conn.SetMaxIdleConns(1)
+	conn.SetConnMaxLifetime(0)
 
 	// Configure SQLite for better reliability and concurrent access
 	pragmas := []string{
-		"PRAGMA journal_mode=WAL",           // Write-Ahead Logging for concurrent access
-		"PRAGMA busy_timeout=5000",           // Wait up to 5 seconds for locks
-		"PRAGMA synchronous=NORMAL",         // Balance between safety and performance
-		"PRAGMA foreign_keys=ON",            // Enable foreign key constraints
-		"PRAGMA temp_store=MEMORY",          // Use memory for temp tables
+		"PRAGMA journal_mode=WAL",   // Write-Ahead Logging for concurrent access
+		"PRAGMA busy_timeout=5000",  // Wait up to 5 seconds for locks
+		"PRAGMA synchronous=NORMAL", // Balance between safety and performance
+		"PRAGMA foreign_keys=ON",    // Enable foreign key constraints
+		"PRAGMA temp_store=MEMORY",  // Use memory for temp tables
 	}
 
 	for _, pragma := range pragmas {
@@ -380,8 +381,9 @@ func (db *DB) rebuildScrapeHistoryTable() (retErr error) {
 	return nil
 }
 
-// createFTS5Index sets up the FTS5 virtual table, backfills existing data,
-// and installs triggers to keep the index in sync with scrape_history.
+// createFTS5Index sets up the FTS5 virtual table.
+// We use a comprehensive "managed" approach (standard FTS5 table) rather than external content
+// to avoid "database disk image is malformed" errors that plagued the external content implementation.
 func (db *DB) createFTS5Index() error {
 	createTable := `
 	CREATE VIRTUAL TABLE IF NOT EXISTS scrape_search USING fts5(
@@ -389,9 +391,7 @@ func (db *DB) createFTS5Index() error {
 		domain,
 		title,
 		clean_text,
-		summary,
-		content='scrape_history',
-		content_rowid='id'
+		summary
 	);
 	`
 
@@ -402,29 +402,37 @@ func (db *DB) createFTS5Index() error {
 		return fmt.Errorf("failed to create FTS5 virtual table: %w", err)
 	}
 
+	// Backfill - explicitly syncing rowid
 	if _, err := db.conn.Exec(`
 		INSERT INTO scrape_search(rowid, url, domain, title, clean_text, summary)
-		SELECT id, url, domain, title, clean_text, summary
+		SELECT id, url, domain, title, clean_text, COALESCE(summary, '')
 		FROM scrape_history
 		WHERE id NOT IN (SELECT rowid FROM scrape_search)
 	`); err != nil {
 		return fmt.Errorf("failed to backfill FTS5 index: %w", err)
 	}
 
+	// Drop existing triggers to ensure we update to the correct definition
+	dropTriggers := `
+	DROP TRIGGER IF EXISTS scrape_history_ai;
+	DROP TRIGGER IF EXISTS scrape_history_au;
+	DROP TRIGGER IF EXISTS scrape_history_ad;
+	`
+	if _, err := db.conn.Exec(dropTriggers); err != nil {
+		return fmt.Errorf("failed to drop old FTS5 triggers: %w", err)
+	}
+
+	// Triggers for standard FTS5 table (Explicit rowid sync)
 	triggers := `
 	CREATE TRIGGER IF NOT EXISTS scrape_history_ai AFTER INSERT ON scrape_history BEGIN
 		INSERT INTO scrape_search(rowid, url, domain, title, clean_text, summary)
-		VALUES (new.id, new.url, new.domain, new.title, new.clean_text, new.summary);
+		VALUES (new.id, new.url, new.domain, new.title, new.clean_text, COALESCE(new.summary, ''));
 	END;
 
 	CREATE TRIGGER IF NOT EXISTS scrape_history_au AFTER UPDATE ON scrape_history BEGIN
-		UPDATE scrape_search SET
-			url = new.url,
-			domain = new.domain,
-			title = new.title,
-			clean_text = new.clean_text,
-			summary = new.summary
-		WHERE rowid = new.id;
+		DELETE FROM scrape_search WHERE rowid = old.id;
+		INSERT INTO scrape_search(rowid, url, domain, title, clean_text, summary)
+		VALUES(new.id, new.url, new.domain, new.title, new.clean_text, COALESCE(new.summary, ''));
 	END;
 
 	CREATE TRIGGER IF NOT EXISTS scrape_history_ad AFTER DELETE ON scrape_history BEGIN
@@ -1022,26 +1030,54 @@ func (db *DB) GetSnapshotsByDomain(domain string, limit int) ([]*Snapshot, error
 
 // UpdateSnapshotSummary updates the summary field for a given snapshot
 func (db *DB) UpdateSnapshotSummary(snapshotID string, summary string) error {
-	query := `UPDATE scrape_history SET summary = ? WHERE id = ?`
+	// 1. Verify row existence first to distinguish logic errors from DB errors
+	var exists int
+	err := db.conn.QueryRow("SELECT 1 FROM scrape_history WHERE id = ?", snapshotID).Scan(&exists)
+	if err == sql.ErrNoRows {
+		return fmt.Errorf("snapshot not found: %s", snapshotID)
+	}
+	if err != nil {
+		return fmt.Errorf("failed to verify snapshot existence: %w", err)
+	}
 
+	// 2. Perform the update
+	query := `UPDATE scrape_history SET summary = ? WHERE id = ?`
 	result, err := db.conn.Exec(query, summary, snapshotID)
 	if err != nil {
-		// Check if this is a database corruption error
-		errStr := err.Error()
-		if strings.Contains(errStr, "database disk image is malformed") ||
-			strings.Contains(errStr, "malformed") ||
-			strings.Contains(errStr, "corrupt") {
-			db.logger.Error("Database corruption detected during summary update: %v", err)
-			// Try to run integrity check
+		// 3. Classify errors
+		// Check for specific SQLite corruption codes if possible, or fall back to string matching
+		isCorruption := false
+		var sqliteErr sqlite3.Error
+		if errors.As(err, &sqliteErr) {
+			if sqliteErr.Code == sqlite3.ErrCorrupt || sqliteErr.Code == sqlite3.ErrNotADB {
+				isCorruption = true
+			}
+		} else {
+			// Fallback string matching
+			errStr := err.Error()
+			if strings.Contains(errStr, "database disk image is malformed") ||
+				strings.Contains(errStr, "malformed") ||
+				strings.Contains(errStr, "corrupt") {
+				isCorruption = true
+			}
+		}
+
+		if isCorruption {
+			db.logger.Error("Potential database corruption during update (ID: %s): %v", snapshotID, err)
+
+			// 4. Verify corruption with integrity check
 			var integrityResult string
 			if checkErr := db.conn.QueryRow("PRAGMA quick_check").Scan(&integrityResult); checkErr == nil {
 				if integrityResult != "ok" {
-					db.logger.Error("Database integrity check confirms corruption: %s", integrityResult)
-					return fmt.Errorf("database corruption detected: %s. Please restore from backup or recreate the database", integrityResult)
+					db.logger.Error("CRITICAL: Database integrity check confirms corruption: %s", integrityResult)
+					return fmt.Errorf("database corruption detected: %s. Please restore from backup", integrityResult)
 				}
 			}
+			// If check passes, it might have been transient or false alarm
+			db.logger.Warn("Database integrity check passed despite error. Proceeding.")
 		}
-		return fmt.Errorf("failed to update snapshot summary: %w", err)
+
+		return fmt.Errorf("failed to execute summary update: %w", err)
 	}
 
 	rowsAffected, err := result.RowsAffected()
@@ -1050,10 +1086,11 @@ func (db *DB) UpdateSnapshotSummary(snapshotID string, summary string) error {
 	}
 
 	if rowsAffected == 0 {
-		return fmt.Errorf("snapshot not found: %s", snapshotID)
+		// This shouldn't happen due to the check at step 1, but technically possible efficiently if racing
+		return fmt.Errorf("snapshot not found during update (race condition?): %s", snapshotID)
 	}
 
-	db.logger.Info("Updated summary for snapshot %s", snapshotID)
+	db.logger.Info("Updated summary for snapshot %s (rows affected: %d)", snapshotID, rowsAffected)
 	return nil
 }
 

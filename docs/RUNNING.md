@@ -302,3 +302,20 @@ After running successfully:
 5. Run tests to ensure everything is working
 
 Happy scraping! 🚀 
+
+## 🛠️ Verification Tools
+
+### **AI Summary Update Verification**
+
+We have a dedicated tool to verify the reliability of AI summary updates and database integrity logic.
+
+```bash
+# Run the verification script
+go run cmd/verify-summary/main.go
+```
+
+**What it tests:**
+1.  **Existence Check**: Ensures updates fail gracefully if the snapshot ID doesn't exist.
+2.  **Persistence**: Verifies that the summary is actually written to the `scrape_history` table.
+3.  **Corruption Detection**: Validates the logic for distinguishing between "not found" errors and actual database corruption.
+4.  **FTS Synchronization**: Checks if the Full-Text Search index is automatically updated via triggers.

@@ -29,21 +29,9 @@ func (h *APIHandler) HandleRebuildFTS5(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Backfill with NULL-safe values to avoid insertion failures
-	if _, err := h.database.ExecRaw(`
-		INSERT INTO scrape_search(rowid, url, domain, title, clean_text, summary)
-		SELECT 
-			id,
-			url,
-			COALESCE(domain, ''),
-			COALESCE(title, ''),
-			COALESCE(clean_text, ''),
-			COALESCE(summary, '')
-		FROM scrape_history
-	`); err != nil {
-		http.Error(w, "Failed to backfill FTS5: "+err.Error(), http.StatusInternalServerError)
-		return
-	}
+	// RebuildFTS5 already performs complete DROP + CREATE + backfill (via createFTS5Index).
+	// We MUST NOT perform a second backfill here, as FTS5 rowid segments are sensitive to
+	// double-insertion even if they are logically "updates", leading to corruption.
 
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(map[string]interface{}{

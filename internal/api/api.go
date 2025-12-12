@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"log"
 	"net/http"
 	"net/url"
 	"os"
@@ -1011,7 +1012,7 @@ func (h *APIHandler) HandleUpdateSnapshotSummary(w http.ResponseWriter, r *http.
 	// Extract snapshot ID from URL path (e.g., /memory/snapshot/{id}/summary)
 	path := strings.TrimPrefix(r.URL.Path, "/")
 	parts := strings.Split(path, "/")
-	
+
 	// Expected path structure: memory/snapshot/{id}/summary
 	// After split: ["memory", "snapshot", "{id}", "summary"]
 	if len(parts) < 4 || parts[0] != "memory" || parts[1] != "snapshot" || parts[3] != "summary" {
@@ -1330,23 +1331,27 @@ func classifyFailureStatus(status int, msg string) string {
 }
 
 // buildUnifiedDiff returns a unified diff string plus added/removed line counts.
+// buildUnifiedDiff returns a unified diff string plus added/removed line counts.
 func buildUnifiedDiff(oldText, newText string) (string, int, int) {
 	dmp := diffmatchpatch.New()
 	diffs := dmp.DiffMain(oldText, newText, false)
 
 	added := 0
 	removed := 0
+
 	for _, d := range diffs {
+		// Count lines by splitting and handling edge cases
+		lineCount := len(strings.Split(strings.TrimSuffix(d.Text, "\n"), "\n"))
+
 		switch d.Type {
 		case diffmatchpatch.DiffInsert:
-			added += strings.Count(d.Text, "\n")
+			added += lineCount
 		case diffmatchpatch.DiffDelete:
-			removed += strings.Count(d.Text, "\n")
+			removed += lineCount
 		}
 	}
 
 	diffText := dmp.DiffPrettyText(diffs)
-
 	return diffText, added, removed
 }
 
