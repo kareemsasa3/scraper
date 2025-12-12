@@ -2,8 +2,6 @@ module github.com/kareemsasa3/arachne
 
 go 1.24
 
-toolchain go1.24.4
-
 require (
 	github.com/PuerkitoBio/goquery v1.8.1
 	github.com/chromedp/cdproto v0.0.0-20250724212937-08a3db8b4327
