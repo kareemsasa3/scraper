@@ -114,12 +114,14 @@ func (s *HeadlessStrategy) Execute(ctx context.Context, urlStr string, cfg *conf
 			chromedp.Flag("disable-dev-shm-usage", true),        // Use /tmp instead of /dev/shm
 			chromedp.Flag("disable-software-rasterizer", true),  // Disable software GPU
 			chromedp.Flag("disable-gpu-sandbox", true),          // Disable GPU sandbox
+			chromedp.Flag("no-sandbox", true),                   // Required in many containerized envs
+			chromedp.Flag("disable-setuid-sandbox", true),       // Required in many containerized envs
 			chromedp.Flag("disable-gl-drawing-for-tests", true), // Disable GL drawing
 			chromedp.Flag("use-gl", "angle"),                    // Use ANGLE for GL
 			chromedp.Flag("use-angle", "swiftshader"),           // Use SwiftShader (software)
 		)
 		disableFeatures = append(disableFeatures, "VizDisplayCompositor")
-		debugLog(urlStr, "  Added container-friendly flags (GPU disabled)")
+		debugLog(urlStr, "  Added container-friendly flags (no-sandbox, GPU disabled)")
 	}
 
 	// Consolidate disable-features flags (prevents crashpad invocation)

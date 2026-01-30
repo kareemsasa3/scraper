@@ -2,7 +2,9 @@ package scraper
 
 import (
 	"context"
+	"fmt"
 	"net/url"
+	"runtime/debug"
 	"sync"
 	"time"
 
@@ -117,7 +119,16 @@ func (s *Scraper) doScrape(ctx context.Context, urlStr string) types.ScrapedData
 		// Execute request with circuit breaker protection
 		err := cb.Execute(func() error {
 			// Delegate the actual scraping to the strategy
-			result, err := s.strategy.Execute(ctx, urlStr, s.config)
+			result, err := func() (res *strategy.ScrapedResult, execErr error) {
+				defer func() {
+					if r := recover(); r != nil {
+						stack := debug.Stack()
+						s.logger.Error("panic: %v\n%s", r, string(stack))
+						execErr = fmt.Errorf("panic: %v", r)
+					}
+				}()
+				return s.strategy.Execute(ctx, urlStr, s.config)
+			}()
 			if err != nil {
 				return err
 			}
