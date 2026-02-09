@@ -664,9 +664,11 @@ func (db *DB) UpdateRetryCount(url string) error {
 // GetLatestSnapshot retrieves the most recent snapshot for a given URL
 func (db *DB) GetLatestSnapshot(urlStr string) (*Snapshot, error) {
 	query := `
-		SELECT id, url, domain, title, clean_text, raw_content, summary,
-		       content_hash, previous_hash, has_changes, change_summary,
-		       status_code, scraped_at, last_checked_at, scrape_status, error_message, retry_count
+		SELECT id, url,
+		       COALESCE(domain, ''), COALESCE(title, ''), COALESCE(clean_text, ''), COALESCE(raw_content, ''), COALESCE(summary, ''),
+		       COALESCE(content_hash, ''), COALESCE(previous_hash, ''), COALESCE(has_changes, 0), COALESCE(change_summary, ''),
+		       COALESCE(status_code, 0), COALESCE(scrape_status, ''), COALESCE(error_message, ''), COALESCE(retry_count, 0),
+		       scraped_at, last_checked_at
 		FROM scrape_history
 		WHERE url = ?
 		ORDER BY scraped_at DESC
@@ -695,11 +697,11 @@ func (db *DB) GetLatestSnapshot(urlStr string) (*Snapshot, error) {
 		&hasChangesInt,
 		&changeSummary,
 		&snapshot.StatusCode,
-		&snapshot.ScrapedAt,
-		&snapshot.LastCheckedAt,
 		&scrapeStatus,
 		&errorMessage,
 		&retryCount,
+		&snapshot.ScrapedAt,
+		&snapshot.LastCheckedAt,
 	)
 
 	if err == sql.ErrNoRows {
@@ -737,9 +739,11 @@ func (db *DB) GetLatestSnapshot(urlStr string) (*Snapshot, error) {
 // GetSnapshotByID retrieves a snapshot by its ID
 func (db *DB) GetSnapshotByID(id string) (*Snapshot, error) {
 	query := `
-		SELECT id, url, domain, title, clean_text, raw_content, summary,
-		       content_hash, previous_hash, has_changes, change_summary,
-		       status_code, scraped_at, last_checked_at, scrape_status, error_message, retry_count
+		SELECT id, url,
+		       COALESCE(domain, ''), COALESCE(title, ''), COALESCE(clean_text, ''), COALESCE(raw_content, ''), COALESCE(summary, ''),
+		       COALESCE(content_hash, ''), COALESCE(previous_hash, ''), COALESCE(has_changes, 0), COALESCE(change_summary, ''),
+		       COALESCE(status_code, 0), COALESCE(scrape_status, ''), COALESCE(error_message, ''), COALESCE(retry_count, 0),
+		       scraped_at, last_checked_at
 		FROM scrape_history
 		WHERE id = ?
 	`
@@ -766,11 +770,11 @@ func (db *DB) GetSnapshotByID(id string) (*Snapshot, error) {
 		&hasChangesInt,
 		&changeSummary,
 		&snapshot.StatusCode,
-		&snapshot.ScrapedAt,
-		&snapshot.LastCheckedAt,
 		&scrapeStatus,
 		&errorMessage,
 		&retryCount,
+		&snapshot.ScrapedAt,
+		&snapshot.LastCheckedAt,
 	)
 
 	if err == sql.ErrNoRows {
@@ -808,9 +812,11 @@ func (db *DB) GetSnapshotByID(id string) (*Snapshot, error) {
 // GetHistoryByURL returns all snapshots for a URL ordered by scraped_at DESC.
 func (db *DB) GetHistoryByURL(urlStr string) ([]*Snapshot, error) {
 	query := `
-		SELECT id, url, domain, title, clean_text, raw_content, summary,
-		       content_hash, previous_hash, has_changes, change_summary,
-		       status_code, scraped_at, last_checked_at, scrape_status, error_message, retry_count
+		SELECT id, url,
+		       COALESCE(domain, ''), COALESCE(title, ''), COALESCE(clean_text, ''), COALESCE(raw_content, ''), COALESCE(summary, ''),
+		       COALESCE(content_hash, ''), COALESCE(previous_hash, ''), COALESCE(has_changes, 0), COALESCE(change_summary, ''),
+		       COALESCE(status_code, 0), COALESCE(scrape_status, ''), COALESCE(error_message, ''), COALESCE(retry_count, 0),
+		       scraped_at, last_checked_at
 		FROM scrape_history
 		WHERE url = ?
 		ORDER BY scraped_at DESC
@@ -846,11 +852,11 @@ func (db *DB) GetHistoryByURL(urlStr string) ([]*Snapshot, error) {
 			&hasChangesInt,
 			&changeSummary,
 			&snapshot.StatusCode,
-			&snapshot.ScrapedAt,
-			&snapshot.LastCheckedAt,
 			&scrapeStatus,
 			&errorMessage,
 			&retryCount,
+			&snapshot.ScrapedAt,
+			&snapshot.LastCheckedAt,
 		); err != nil {
 			return nil, fmt.Errorf("failed to scan history row: %w", err)
 		}
@@ -883,9 +889,11 @@ func (db *DB) GetHistoryByURL(urlStr string) ([]*Snapshot, error) {
 // GetSnapshotByTimestamp returns the snapshot for a URL at an exact scraped_at timestamp.
 func (db *DB) GetSnapshotByTimestamp(urlStr string, ts time.Time) (*Snapshot, error) {
 	query := `
-		SELECT id, url, domain, title, clean_text, raw_content, summary,
-		       content_hash, previous_hash, has_changes, change_summary,
-		       status_code, scraped_at, last_checked_at, scrape_status, error_message, retry_count
+		SELECT id, url,
+		       COALESCE(domain, ''), COALESCE(title, ''), COALESCE(clean_text, ''), COALESCE(raw_content, ''), COALESCE(summary, ''),
+		       COALESCE(content_hash, ''), COALESCE(previous_hash, ''), COALESCE(has_changes, 0), COALESCE(change_summary, ''),
+		       COALESCE(status_code, 0), COALESCE(scrape_status, ''), COALESCE(error_message, ''), COALESCE(retry_count, 0),
+		       scraped_at, last_checked_at
 		FROM scrape_history
 		WHERE url = ? AND scraped_at = ?
 		LIMIT 1
@@ -913,11 +921,11 @@ func (db *DB) GetSnapshotByTimestamp(urlStr string, ts time.Time) (*Snapshot, er
 		&hasChangesInt,
 		&changeSummary,
 		&snapshot.StatusCode,
-		&snapshot.ScrapedAt,
-		&snapshot.LastCheckedAt,
 		&scrapeStatus,
 		&errorMessage,
 		&retryCount,
+		&snapshot.ScrapedAt,
+		&snapshot.LastCheckedAt,
 	)
 
 	if err == sql.ErrNoRows {
@@ -954,9 +962,11 @@ func (db *DB) GetSnapshotByTimestamp(urlStr string, ts time.Time) (*Snapshot, er
 // GetSnapshotsByDomain retrieves all snapshots for a given domain
 func (db *DB) GetSnapshotsByDomain(domain string, limit int) ([]*Snapshot, error) {
 	query := `
-		SELECT id, url, domain, title, clean_text, raw_content, summary,
-		       content_hash, previous_hash, has_changes, change_summary,
-		       status_code, scraped_at, last_checked_at, scrape_status, error_message, retry_count
+		SELECT id, url,
+		       COALESCE(domain, ''), COALESCE(title, ''), COALESCE(clean_text, ''), COALESCE(raw_content, ''), COALESCE(summary, ''),
+		       COALESCE(content_hash, ''), COALESCE(previous_hash, ''), COALESCE(has_changes, 0), COALESCE(change_summary, ''),
+		       COALESCE(status_code, 0), COALESCE(scrape_status, ''), COALESCE(error_message, ''), COALESCE(retry_count, 0),
+		       scraped_at, last_checked_at
 		FROM scrape_history
 		WHERE domain = ?
 		ORDER BY scraped_at DESC
@@ -993,11 +1003,11 @@ func (db *DB) GetSnapshotsByDomain(domain string, limit int) ([]*Snapshot, error
 			&hasChangesInt,
 			&changeSummary,
 			&snapshot.StatusCode,
-			&snapshot.ScrapedAt,
-			&snapshot.LastCheckedAt,
 			&scrapeStatus,
 			&errorMessage,
 			&retryCount,
+			&snapshot.ScrapedAt,
+			&snapshot.LastCheckedAt,
 		)
 		if err != nil {
 			return nil, fmt.Errorf("failed to scan snapshot: %w", err)
@@ -1187,9 +1197,11 @@ func (db *DB) GetRecentSnapshots(limit, offset int) ([]*Snapshot, int, error) {
 
 	// Get paginated snapshots
 	query := `
-		SELECT id, url, domain, title, clean_text, raw_content, summary,
-		       content_hash, previous_hash, has_changes, change_summary,
-		       status_code, scraped_at, last_checked_at, scrape_status, error_message, retry_count
+		SELECT id, url,
+		       COALESCE(domain, ''), COALESCE(title, ''), COALESCE(clean_text, ''), COALESCE(raw_content, ''), COALESCE(summary, ''),
+		       COALESCE(content_hash, ''), COALESCE(previous_hash, ''), COALESCE(has_changes, 0), COALESCE(change_summary, ''),
+		       COALESCE(status_code, 0), COALESCE(scrape_status, ''), COALESCE(error_message, ''), COALESCE(retry_count, 0),
+		       scraped_at, last_checked_at
 		FROM scrape_history
 		ORDER BY scraped_at DESC
 		LIMIT ? OFFSET ?
@@ -1226,11 +1238,11 @@ func (db *DB) GetRecentSnapshots(limit, offset int) ([]*Snapshot, int, error) {
 			&hasChangesInt,
 			&changeSummary,
 			&snapshot.StatusCode,
-			&snapshot.ScrapedAt,
-			&snapshot.LastCheckedAt,
 			&scrapeStatus,
 			&errorMessage,
 			&retryCount,
+			&snapshot.ScrapedAt,
+			&snapshot.LastCheckedAt,
 		)
 		if err != nil {
 			return nil, 0, fmt.Errorf("failed to scan snapshot: %w", err)
